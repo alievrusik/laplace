@@ -1,0 +1,28 @@
+{
+  "name": "laplace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "doctor": "tsx src/doctor.ts",
+    "doctor:cursor": "tsx src/cursorDoctor.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@cursor/sdk": "latest",
+    "@octokit/rest": "latest",
+    "dotenv": "latest",
+    "https-proxy-agent": "^9.0.0",
+    "openai": "latest",
+    "telegraf": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "tsx": "latest",
+    "typescript": "latest"
+  }
+}
