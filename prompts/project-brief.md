@@ -6,7 +6,7 @@ Focus on:
 
 - what input data the user has or can provide;
 - what output the user wants;
-- the fastest Vercel web demo that can transform that input into that output using one or more configured foundation providers.
+- the fastest web demo that can transform that input into that output using one or more configured foundation providers.
 - whether a segmentation/localization flow is needed; if so, Segmind SAM3 Image is available for promptable image segmentation/detection, and SAM3 Video can be considered only for video segmentation/tracking.
 
 Ignore casual chatter. Do not use generic project names like `foundation`.

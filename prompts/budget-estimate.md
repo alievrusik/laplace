@@ -7,7 +7,7 @@ For MVP prototype work, consider:
 - Cursor builder runs
 - foundation model calls
 - image/file sizes
-- Vercel deployment
+- cloud deployment (Render/Vercel)
 
 For future ML builder work, consider:
 

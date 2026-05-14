@@ -20,10 +20,10 @@ Requirements:
 - In normalization, accept both `data:` URLs and external image URLs for preview/overlay artifacts.
 - If upstream returns only one visual output (only preview or only overlay), mirror it so both UI panes remain usable.
 - Add robust fallback path: when upstream is unreachable or returns 200 with empty detections/masks, return a local visual fallback plus explicit warning instead of blank result.
-- Return per-item diagnostics (e.g. `processingMode`, `outputKind`, `attemptUsed`, `upstreamStatus`) so failures are debuggable in Vercel logs and UI.
+- Return per-item diagnostics (e.g. `processingMode`, `outputKind`, `attemptUsed`, `upstreamStatus`) so failures are debuggable in deploy logs and UI.
 - Use Segmind only for segmentation/localization flows. Do not choose Segmind LLM, image generation, video generation, audio, or embedding models for non-segmentation requests.
 - If multiple providers are selected, use each for its strongest role and keep the UI as one coherent demo, not separate provider demos.
 - Prepare evaluator-ready project checks: local frontend start command, passing build/typecheck path, and a reproducible smoke flow in README (open app -> provide sample input -> trigger action -> verify output).
 - Add `README.md`, `prototype.md`, and `.cursor/rules/laplace-prototype.md`.
-- Prepare the project for Vercel preview deploy.
+- Prepare the project for cloud preview deploy (Render-first, Vercel-compatible).
 - Keep dependencies conservative and explain limitations clearly.

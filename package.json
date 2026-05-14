@@ -9,6 +9,9 @@
     "doctor:cursor": "tsx src/cursorDoctor.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:runtime-harness": "tsx src/testing/runRuntimeHarness.ts",
+    "test:regressions": "tsx src/testing/runRegressions.ts",
+    "migrate:render": "tsx src/scripts/migrateVercelToRender.ts",
     "start": "node dist/index.js"
   },
   "dependencies": {

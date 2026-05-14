@@ -1,20 +1,40 @@
-import { Agent, CursorAgentError } from "@cursor/sdk";
 import type { ProjectBrief, BuilderResult, EvaluationVerdict } from "../domain/types.js";
-import type { SDKMessage } from "@cursor/sdk";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
+import {
+  AgentRuntimeStartupError,
+  CursorSdkAgentRuntime,
+  type AgentRuntime,
+  type RuntimeSession,
+} from "../agents/runtime.js";
 
 const MAX_EVALUATION_ATTEMPTS = 3;
 const REQUIRED_EVALUATOR_TEST_MARKERS = ["FRONTEND_START", "FRONTEND_VISUAL", "FRONTEND_FLOW"] as const;
 const execFileAsync = promisify(execFile);
 
 export class ProjectBuilder {
+  private readonly runtime: AgentRuntime;
+  private readonly builderModelId: string;
+  private readonly testerModelId: string;
+  private readonly revisorModelId: string;
+
   constructor(
     private readonly config: {
       apiKey: string;
-      model: string;
+      model?: string;
+      builderModel?: string;
+      evaluatorModel?: string;
+      testerModel?: string;
+      revisorModel?: string;
     },
-  ) {}
+    runtime?: AgentRuntime,
+  ) {
+    const fallbackModel = config.model ?? "composer-2-fast";
+    this.builderModelId = config.builderModel ?? fallbackModel;
+    this.testerModelId = config.testerModel ?? config.evaluatorModel ?? this.builderModelId;
+    this.revisorModelId = config.revisorModel ?? this.testerModelId;
+    this.runtime = runtime ?? new CursorSdkAgentRuntime({ apiKey: config.apiKey });
+  }
 
   async build(args: {
     cwd: string;
@@ -24,11 +44,10 @@ export class ProjectBuilder {
     onEvent?: (message: string) => Promise<void>;
   }): Promise<BuilderResult> {
     await args.onEvent?.("Cursor Agent.create starting");
-    const agent = await this.withTimeout(
-      Agent.create({
-        apiKey: this.config.apiKey,
-        model: { id: this.config.model },
-        local: { cwd: args.cwd },
+    const session = await this.withTimeout(
+      this.runtime.createSession({
+        cwd: args.cwd,
+        modelId: this.builderModelId,
       }),
       60 * 1000,
       "Cursor Agent.create timed out after 60 seconds",
@@ -40,7 +59,7 @@ export class ProjectBuilder {
       const evaluation = await this.buildUntilAccepted({
         cwd: args.cwd,
         brief: args.brief,
-        builderAgent: agent,
+        builderSession: session,
         initialPrompt: prompt,
         timeoutMessage: "Cursor builder timed out after 10 minutes",
         onEvent: args.onEvent,
@@ -50,19 +69,19 @@ export class ProjectBuilder {
         repoUrl: args.repoUrl,
         summary: `Builder finished and evaluator accepted ${args.brief.projectName}.`,
         limitations: [
-          "Deploy URL is attached after Vercel finishes the preview deployment.",
+          "Deploy URL is attached after deployment provider finishes the preview deployment.",
           ...evaluation.residualRisks,
         ],
         evaluation,
       };
     } catch (error) {
-      if (error instanceof CursorAgentError) {
+      if (error instanceof AgentRuntimeStartupError) {
         throw new Error(`Cursor builder startup failed: ${error.message}`);
       }
       throw error;
     } finally {
       await this.cleanupDevServers(args.cwd, args.onEvent);
-      await agent[Symbol.asyncDispose]();
+      await session.dispose();
     }
   }
 
@@ -73,11 +92,10 @@ export class ProjectBuilder {
     onEvent?: (message: string) => Promise<void>;
   }): Promise<BuilderResult> {
     await args.onEvent?.("Cursor Agent.create starting");
-    const agent = await this.withTimeout(
-      Agent.create({
-        apiKey: this.config.apiKey,
-        model: { id: this.config.model },
-        local: { cwd: args.cwd },
+    const session = await this.withTimeout(
+      this.runtime.createSession({
+        cwd: args.cwd,
+        modelId: this.builderModelId,
       }),
       60 * 1000,
       "Cursor Agent.create timed out after 60 seconds",
@@ -90,7 +108,7 @@ export class ProjectBuilder {
         cwd: args.cwd,
         projectSlug: args.projectSlug,
         changeRequest: args.changeRequest,
-        builderAgent: agent,
+        builderSession: session,
         initialPrompt: prompt,
         timeoutMessage: "Cursor change timed out after 10 minutes",
         onEvent: args.onEvent,
@@ -102,27 +120,24 @@ export class ProjectBuilder {
         evaluation,
       };
     } catch (error) {
-      if (error instanceof CursorAgentError) {
+      if (error instanceof AgentRuntimeStartupError) {
         throw new Error(`Cursor change startup failed: ${error.message}`);
       }
       throw error;
     } finally {
       await this.cleanupDevServers(args.cwd, args.onEvent);
-      await agent[Symbol.asyncDispose]();
+      await session.dispose();
     }
   }
 
   private async streamRun(
-    stream: AsyncGenerator<SDKMessage, void>,
+    stream: AsyncGenerator<string, void>,
     onEvent?: (message: string) => Promise<void>,
   ): Promise<void> {
     try {
       for await (const event of stream) {
-        const message = summarizeSdkMessage(event);
-        if (message) {
-          console.log(`[cursor] ${message}`);
-          await onEvent?.(message);
-        }
+        console.log(`[cursor] ${event}`);
+        await onEvent?.(event);
       }
     } catch (error) {
       console.warn("Cursor stream ended with an error", error);
@@ -134,7 +149,7 @@ export class ProjectBuilder {
     brief?: ProjectBrief;
     projectSlug?: string;
     changeRequest?: string;
-    builderAgent: Awaited<ReturnType<typeof Agent.create>>;
+    builderSession: RuntimeSession;
     initialPrompt: string;
     timeoutMessage: string;
     onEvent?: (message: string) => Promise<void>;
@@ -145,31 +160,54 @@ export class ProjectBuilder {
     for (let attempt = 1; attempt <= MAX_EVALUATION_ATTEMPTS; attempt += 1) {
       await args.onEvent?.(`Builder attempt ${attempt}/${MAX_EVALUATION_ATTEMPTS} starting`);
       await this.runAgentMessage({
-        agent: args.builderAgent,
+        session: args.builderSession,
         prompt,
         timeoutMessage: args.timeoutMessage,
         onEvent: args.onEvent,
       });
 
-      await args.onEvent?.(`Evaluator attempt ${attempt}/${MAX_EVALUATION_ATTEMPTS} starting`);
-      const verdict = await this.evaluateProject({
+      await args.onEvent?.(`Tester attempt ${attempt}/${MAX_EVALUATION_ATTEMPTS} starting`);
+      const testerVerdict = await this.evaluateProject({
         cwd: args.cwd,
         brief: args.brief,
         projectSlug: args.projectSlug,
         changeRequest: args.changeRequest,
         attempt,
+        role: "tester",
         onEvent: args.onEvent,
       });
-      lastVerdict = verdict;
-
       await args.onEvent?.(
-        `Evaluator verdict: ${verdict.accepted ? "accepted" : "rejected"} (${verdict.score}/100) - ${verdict.summary}`,
+        `Tester verdict: ${testerVerdict.accepted ? "accepted" : "rejected"} (${testerVerdict.score}/100) - ${testerVerdict.summary}`,
       );
 
-      if (verdict.accepted) return verdict;
+      if (!testerVerdict.accepted) {
+        lastVerdict = testerVerdict;
+      } else {
+        await args.onEvent?.(`Revisor attempt ${attempt}/${MAX_EVALUATION_ATTEMPTS} starting`);
+        const revisorVerdict = await this.evaluateProject({
+          cwd: args.cwd,
+          brief: args.brief,
+          projectSlug: args.projectSlug,
+          changeRequest: args.changeRequest,
+          attempt,
+          role: "revisor",
+          testerSummary: testerVerdict.summary,
+          onEvent: args.onEvent,
+        });
+        await args.onEvent?.(
+          `Revisor verdict: ${revisorVerdict.accepted ? "accepted" : "rejected"} (${revisorVerdict.score}/100) - ${revisorVerdict.summary}`,
+        );
+        lastVerdict = mergeVerdicts(testerVerdict, revisorVerdict);
+      }
+
+      await args.onEvent?.(
+        `Combined verdict: ${lastVerdict.accepted ? "accepted" : "rejected"} (${lastVerdict.score}/100) - ${lastVerdict.summary}`,
+      );
+
+      if (lastVerdict.accepted) return lastVerdict;
       if (attempt === MAX_EVALUATION_ATTEMPTS) break;
 
-      prompt = this.renderFixPrompt(verdict);
+      prompt = this.renderFixPrompt(lastVerdict);
     }
 
     await args.onEvent?.("Evaluator rejected the project after maximum attempts; job will fail before commit/deploy");
@@ -185,20 +223,20 @@ export class ProjectBuilder {
   }
 
   private async runAgentMessage(args: {
-    agent: Awaited<ReturnType<typeof Agent.create>>;
+    session: RuntimeSession;
     prompt: string;
     timeoutMessage: string;
     onEvent?: (message: string) => Promise<void>;
   }): Promise<string> {
     await args.onEvent?.("Cursor agent.send starting");
     const run = await this.withTimeout(
-      args.agent.send(args.prompt),
+      args.session.send(args.prompt),
       60 * 1000,
       "Cursor agent.send timed out after 60 seconds",
     );
     await args.onEvent?.(`Cursor run started: agent=${run.agentId}, run=${run.id}`);
 
-    const streamPromise = run.supports("stream")
+    const streamPromise = run.supportsStream
       ? this.streamRun(run.stream(), args.onEvent)
       : Promise.resolve();
     const result = await this.withTimeout(run.wait(), 10 * 60 * 1000, args.timeoutMessage);
@@ -217,36 +255,40 @@ export class ProjectBuilder {
     projectSlug?: string;
     changeRequest?: string;
     attempt: number;
+    role: "tester" | "revisor";
+    testerSummary?: string;
     onEvent?: (message: string) => Promise<void>;
   }): Promise<EvaluationVerdict> {
-    await args.onEvent?.("Evaluator Agent.create starting");
-    const agent = await this.withTimeout(
-      Agent.create({
-        apiKey: this.config.apiKey,
-        model: { id: this.config.model },
-        local: { cwd: args.cwd },
+    const roleLabel = args.role === "tester" ? "Tester" : "Revisor";
+    await args.onEvent?.(`${roleLabel} Agent.create starting`);
+    const session = await this.withTimeout(
+      this.runtime.createSession({
+        cwd: args.cwd,
+        modelId: args.role === "tester" ? this.testerModelId : this.revisorModelId,
       }),
       60 * 1000,
-      "Evaluator Agent.create timed out after 60 seconds",
+      `${roleLabel} Agent.create timed out after 60 seconds`,
     );
-    await args.onEvent?.("Evaluator Agent.create finished");
+    await args.onEvent?.(`${roleLabel} Agent.create finished`);
 
     try {
       const output = await this.runAgentMessage({
-        agent,
-        prompt: this.renderEvaluationPrompt(args),
-        timeoutMessage: "Cursor evaluator timed out after 10 minutes",
+        session,
+        prompt: args.role === "tester"
+          ? this.renderTesterPrompt(args)
+          : this.renderRevisorPrompt(args),
+        timeoutMessage: `Cursor ${args.role} timed out after 10 minutes`,
         onEvent: args.onEvent,
       });
       return parseEvaluationVerdict(output);
     } catch (error) {
-      if (error instanceof CursorAgentError) {
-        throw new Error(`Cursor evaluator startup failed: ${error.message}`);
+      if (error instanceof AgentRuntimeStartupError) {
+        throw new Error(`Cursor ${args.role} startup failed: ${error.message}`);
       }
       throw error;
     } finally {
       await this.cleanupDevServers(args.cwd, args.onEvent);
-      await agent[Symbol.asyncDispose]();
+      await session.dispose();
     }
   }
 
@@ -332,7 +374,7 @@ ${JSON.stringify(args.demoFoundationEnv, null, 2)}
 
 Requirements:
 - Start from the existing scaffold files in the repository. Evolve and replace scaffold parts as needed instead of reinitializing the project from scratch.
-- Create a small, polished prototype suitable for a Vercel preview.
+- Create a small, polished prototype suitable for a cloud preview deployment.
 - Build the app around the brief's input-to-output flow: user provides input, server-side API calls the configured foundation model, UI displays the output clearly.
 - Choose the frontend shape that best fits the input and output. Do not force a generic layout.
 - Use Russian language by default for all user-facing content: UI labels, buttons, hints, validation messages, empty states, README usage examples, and demo text unless the brief explicitly requests another language.
@@ -359,7 +401,7 @@ Requirements:
   - support both \`data:\` URLs and remote image URLs in normalized preview/overlay fields;
   - if SAM3 returns only one visual artifact (only preview or only overlay), mirror it to the other UI slot so "mask preview" and "overlay" panes never show a false empty state;
   - include robust fallback behavior: if remote returns 200 with empty detections/masks or remote call fails, return a useful local visual fallback with clear warning text instead of hard failure;
-  - return diagnostic metadata per item (for example \`processingMode\`, \`outputKind\`, \`attemptUsed\`, \`upstreamStatus\`) to make Vercel/runtime debugging possible.
+  - return diagnostic metadata per item (for example \`processingMode\`, \`outputKind\`, \`attemptUsed\`, \`upstreamStatus\`) to make deploy/runtime debugging possible.
 - Use Segmind only for segmentation/localization flows. Do not choose Segmind LLM, image generation, video generation, audio, or embedding models for unrelated tasks.
 - If DEMO_FOUNDATION_PROVIDERS also includes "anthropic" or "vllm", use them only for complementary reasoning/summarization/explanation that SAM3 does not provide directly.
 - Add README.md with setup and deployment notes.
@@ -394,14 +436,14 @@ Rules:
 - Do not wire every foundation provider into the app by default: only add integrations that the change request (and existing project purpose) actually need.
 - Keep SAM3 integration resilient: handle binary-or-JSON responses, avoid preview/overlay single-output UI breakage, and preserve/introduce empty-result + fetch-failure fallback behavior.
 - Do not add manual point/line/blob/box input controls unless the change request explicitly asks for this advanced interaction.
-- Keep the app Vercel-ready.
+- Keep the app deployment-ready on Render/Vercel.
 - Update README.md or prototype.md if behavior or setup changes.
 - Keep evaluator readiness intact: frontend must still run locally, and README must contain a reproducible smoke flow for visual/functional checks.
 - Run the relevant build/typecheck/lint command when practical.
 - Do not commit or push. Laplace orchestrator handles git after you finish writing files.`;
   }
 
-  private renderEvaluationPrompt(args: {
+  private renderTesterPrompt(args: {
     brief?: ProjectBrief;
     projectSlug?: string;
     changeRequest?: string;
@@ -426,7 +468,7 @@ Acceptance criteria:
 - Foundation model calls stay server-side; no secret is placed in client code or NEXT_PUBLIC variables.
 - For segmentation/localization flows, SAM3 usage follows Segmind SAM3 Image conventions: server-side POST to /sam3-image, x-api-key auth, image plus text_prompt, optional points/boxes, and preview/overlay/mask handling. Reject if implementation uses /segment or bearer auth for this API.
 - Reject if segmentation classes are sent only in Russian to SAM3 without English normalization/mapping.
-- The UI is coherent, polished enough for a Vercel preview, and does not mention internal provider names in client-facing copy.
+- The UI is coherent, polished enough for a cloud preview, and does not mention internal provider names in client-facing copy.
 - README.md, prototype.md, and .cursor/rules/laplace-prototype.md are present and useful.
 
 Mandatory evaluator test protocol (must run on every attempt):
@@ -442,6 +484,58 @@ In testsRun include these exact marker prefixes so orchestration can verify cove
 - FRONTEND_FLOW: <user flow executed and observed output>
 
 Run practical checks where possible, such as npm install, npm run build, npm run typecheck, npm run lint, or targeted tests. Reject if the core build/test path fails, mandatory frontend protocol is missing, the requested scenario is missing, secrets leak, or the app is clearly not usable.
+
+Return only JSON, no markdown, matching this schema:
+{
+  "accepted": true,
+  "score": 0,
+  "summary": "short verdict",
+  "issues": ["observed problems"],
+  "requiredFixes": ["must-fix items before acceptance"],
+  "testsRun": ["commands/checks and outcomes"],
+  "residualRisks": ["non-blocking risks after acceptance"]
+}`;
+  }
+
+  private renderRevisorPrompt(args: {
+    brief?: ProjectBrief;
+    projectSlug?: string;
+    changeRequest?: string;
+    attempt: number;
+    testerSummary?: string;
+  }): string {
+    const target = args.brief
+      ? `Original structured brief:\n${JSON.stringify(args.brief, null, 2)}`
+      : `Existing project: ${args.projectSlug}\nChange request:\n${args.changeRequest}`;
+
+    return `You are Revisor Agent for Laplace.
+
+Your job is to review final UX and scenario-fit in the current working directory. Do not edit files.
+
+${target}
+
+Tester summary from previous stage:
+${args.testerSummary ?? "not provided"}
+
+Review attempt: ${args.attempt}/${MAX_EVALUATION_ATTEMPTS}
+
+Acceptance criteria:
+- UI flow is coherent and matches the requested business scenario.
+- Smoke scenario from README can be reproduced quickly.
+- User-facing copy is clear and mostly non-technical.
+- For segmentation/localization tasks, visual results are understandable in UI.
+- If project is update-mode, requested change is visibly reflected.
+
+Mandatory checks:
+1) Start frontend locally.
+2) Open app URL and inspect visual states.
+3) Execute at least one realistic user flow from input to output.
+4) Confirm artifacts/docs still align with user expectation.
+
+In testsRun include these marker prefixes:
+- FRONTEND_START: <command, URL, and result>
+- FRONTEND_VISUAL: <what you saw in the UI>
+- FRONTEND_FLOW: <user flow executed and observed output>
 
 Return only JSON, no markdown, matching this schema:
 {
@@ -472,7 +566,7 @@ ${verdict.testsRun.map((test) => `- ${test}`).join("\n") || "- None listed"}
 
 Rules:
 - Make the smallest changes needed to satisfy the evaluator.
-- Keep the app Vercel-ready.
+- Keep the app deployment-ready on Render/Vercel.
 - Keep foundation model calls server-side and do not expose secrets.
 - Update README.md/prototype.md if the behavior or setup changes.
 - Run relevant checks when practical.
@@ -512,6 +606,22 @@ function parseEvaluationVerdict(output: string): EvaluationVerdict {
   };
 }
 
+function mergeVerdicts(tester: EvaluationVerdict, revisor: EvaluationVerdict): EvaluationVerdict {
+  const accepted = tester.accepted && revisor.accepted;
+  const combinedScore = Math.round((tester.score + revisor.score) / 2);
+  return {
+    accepted,
+    score: combinedScore,
+    summary: accepted
+      ? `Tester+Revisor accepted. Tester: ${tester.summary}; Revisor: ${revisor.summary}`
+      : `Tester/Revisor rejected. Tester: ${tester.summary}; Revisor: ${revisor.summary}`,
+    issues: uniqueStrings([...tester.issues, ...revisor.issues]),
+    requiredFixes: uniqueStrings([...tester.requiredFixes, ...revisor.requiredFixes]),
+    testsRun: uniqueStrings([...tester.testsRun, ...revisor.testsRun]),
+    residualRisks: uniqueStrings([...tester.residualRisks, ...revisor.residualRisks]),
+  };
+}
+
 function parseJsonObject(output: string): Record<string, unknown> {
   try {
     const value = JSON.parse(output);
@@ -542,33 +652,12 @@ function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.map(String).map((item) => item.trim()).filter(Boolean) : [];
 }
 
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))];
+}
+
 function missingRequiredTestMarkers(testsRun: string[]): string[] {
   return REQUIRED_EVALUATOR_TEST_MARKERS.filter(
     (marker) => !testsRun.some((line) => line.toUpperCase().startsWith(`${marker}:`)),
   );
-}
-
-function summarizeSdkMessage(event: SDKMessage): string | undefined {
-  if (event.type === "status") {
-    return `Cursor status: ${event.status}${event.message ? ` - ${event.message}` : ""}`;
-  }
-
-  if (event.type === "task") {
-    return event.text ? `Cursor task: ${event.text.slice(0, 500)}` : undefined;
-  }
-
-  if (event.type === "tool_call") {
-    return `Cursor tool ${event.name}: ${event.status}`;
-  }
-
-  if (event.type === "assistant") {
-    const text = event.message.content
-      .filter((block) => block.type === "text")
-      .map((block) => block.text)
-      .join("\n")
-      .trim();
-    return text ? `Cursor: ${text.slice(0, 500)}` : undefined;
-  }
-
-  return undefined;
 }

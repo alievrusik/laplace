@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: laplace-prod
+    env: node
+    plan: starter
+    buildCommand: npm install && npm run build
+    startCommand: npm run start
+    healthCheckPath: /health
+    autoDeploy: true

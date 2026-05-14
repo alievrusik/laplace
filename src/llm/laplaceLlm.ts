@@ -37,8 +37,28 @@ export class LaplaceLlm {
     const message = completion.choices[0]?.message as
       | { content?: string | null; reasoning?: string | null }
       | undefined;
+    const primaryContent = sanitizeContent(message?.content ?? "");
 
-    return sanitizeContent(message?.content ?? "");
+    if (primaryContent) return primaryContent;
+
+    if (!this.config.disableReasoning) {
+      // Some local reasoning models can spend the whole token budget on thought
+      // and return an empty `content`. Retry once with thinking disabled.
+      const fallbackCompletion = await this.client.chat.completions.create(
+        {
+          ...request,
+          chat_template_kwargs: {
+            enable_thinking: false,
+          },
+        } as never,
+      );
+      const fallbackMessage = fallbackCompletion.choices[0]?.message as
+        | { content?: string | null }
+        | undefined;
+      return sanitizeContent(fallbackMessage?.content ?? "");
+    }
+
+    return "";
   }
 
   async completeJson<T>(messages: ChatCompletionMessageParam[]): Promise<T> {
@@ -66,7 +86,6 @@ export class LaplaceLlm {
 function sanitizeContent(text: string): string {
   return text
     .replace(/<think>[\s\S]*?<\/think>/gi, "")
-    .replace(/Thinking Process:[\s\S]*/i, "")
     .trim();
 }
 

@@ -1,5 +1,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import {
+  AgentRuntimeStartupError,
+  CursorSdkAgentRuntime,
+  type AgentRuntime,
+} from "../agents/runtime.js";
 import type { ResourceEstimate } from "../domain/types.js";
 import type { LaplaceLlm } from "../llm/laplaceLlm.js";
 import {
@@ -8,6 +13,9 @@ import {
 } from "./historicalBenchmarks.js";
 
 const USD_TO_RUB = 90;
+const AGENT_CREATE_TIMEOUT_MS = 60 * 1000;
+const AGENT_SEND_TIMEOUT_MS = 60 * 1000;
+const AGENT_WAIT_TIMEOUT_MS = 2 * 60 * 1000;
 
 type EstimateContext = {
   readme?: string;
@@ -17,13 +25,21 @@ type EstimateContext = {
 };
 
 export class ResourceEstimator {
+  private readonly runtime: AgentRuntime;
+
   constructor(
     private readonly deps: {
       llm: LaplaceLlm;
       workspaceDir: string;
       memoryDir: string;
+      cursorApiKey: string;
+      runtimeCwd: string;
+      modelId: string;
     },
-  ) {}
+    runtime?: AgentRuntime,
+  ) {
+    this.runtime = runtime ?? new CursorSdkAgentRuntime({ apiKey: deps.cursorApiKey });
+  }
 
   async estimateForProject(args: {
     projectSlug: string;
@@ -36,6 +52,31 @@ export class ResourceEstimator {
       contextText: [conversation, context.readme, context.prototype, context.memoryCard].filter(Boolean).join("\n"),
     });
     const fallback = inferFallbackEstimate(args.projectSlug, historicalBaseline, historical.sources);
+    const payload = JSON.stringify(
+      {
+        projectSlug: args.projectSlug,
+        conversation,
+        context,
+        historicalBenchmarks: {
+          sources: historical.sources,
+          normalizedSnapshot: historical.summary,
+          baselineSuggestion: historicalBaseline,
+        },
+        outputRules: {
+          fastRangeOnly: true,
+          target: "production-readiness-estimate",
+        },
+      },
+      null,
+      2,
+    );
+
+    try {
+      const estimate = await this.runEstimatorAgent(payload);
+      return normalizeEstimate(estimate, fallback, historical.sources);
+    } catch (runtimeError) {
+      console.error("Estimator runtime failed; fallback to LaplaceLlm", runtimeError);
+    }
 
     try {
       const estimate = await this.deps.llm.completeJson<ResourceEstimate>([
@@ -45,27 +86,9 @@ export class ResourceEstimator {
         },
         {
           role: "user",
-          content: JSON.stringify(
-            {
-              projectSlug: args.projectSlug,
-              conversation,
-              context,
-              historicalBenchmarks: {
-                sources: historical.sources,
-                normalizedSnapshot: historical.summary,
-                baselineSuggestion: historicalBaseline,
-              },
-              outputRules: {
-                fastRangeOnly: true,
-                target: "production-readiness-estimate",
-              },
-            },
-            null,
-            2,
-          ),
+          content: payload,
         },
       ]);
-
       return normalizeEstimate(estimate, fallback, historical.sources);
     } catch (error) {
       console.error("Resource estimation failed; using fallback", error);
@@ -97,6 +120,55 @@ export class ResourceEstimator {
       packageJson: trimForPrompt(packageJson, 2000),
       memoryCard: trimForPrompt(memoryCard, 4000),
     };
+  }
+
+  private async runEstimatorAgent(payload: string): Promise<ResourceEstimate> {
+    const session = await this.withTimeout(
+      this.runtime.createSession({
+        cwd: this.deps.runtimeCwd,
+        modelId: this.deps.modelId,
+      }),
+      AGENT_CREATE_TIMEOUT_MS,
+      "Estimator agent runtime startup timed out after 60 seconds",
+    );
+
+    try {
+      const run = await this.withTimeout(
+        session.send(renderEstimatorRuntimePrompt(payload)),
+        AGENT_SEND_TIMEOUT_MS,
+        "Estimator agent send timed out after 60 seconds",
+      );
+      const result = await this.withTimeout(
+        run.wait(),
+        AGENT_WAIT_TIMEOUT_MS,
+        "Estimator agent response timed out after 2 minutes",
+      );
+      if (result.status !== "finished") {
+        throw new Error(`Estimator agent run did not finish successfully: ${result.id} (${result.status})`);
+      }
+      return parseJsonResponse<ResourceEstimate>(result.result ?? "");
+    } catch (error) {
+      if (error instanceof AgentRuntimeStartupError) {
+        throw new Error(`Estimator agent startup failed: ${error.message}`);
+      }
+      throw error;
+    } finally {
+      await session.dispose();
+    }
+  }
+
+  private async withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(message)), ms);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 }
 
@@ -140,6 +212,42 @@ Return only valid JSON with this exact shape:
   "risks": ["string"],
   "nextSteps": ["string"]
 }`;
+}
+
+function renderEstimatorRuntimePrompt(payload: string): string {
+  return [
+    "You are agent_estimator for Laplace.",
+    "Do not run tools and do not edit files.",
+    "Use only the provided JSON input and return ONLY valid JSON in the requested schema.",
+    "",
+    "System instructions:",
+    renderEstimatorPrompt(),
+    "",
+    "Input:",
+    payload,
+  ].join("\n");
+}
+
+function parseJsonResponse<T>(text: string): T {
+  return JSON.parse(extractJsonPayload(text)) as T;
+}
+
+function extractJsonPayload(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    throw new Error("Estimator runtime agent returned empty response");
+  }
+
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) return trimmed;
+
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) return fenced[1].trim();
+
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start >= 0 && end > start) return trimmed.slice(start, end + 1);
+
+  throw new Error(`Estimator runtime response did not contain JSON: ${trimmed.slice(0, 300)}`);
 }
 
 function inferFallbackEstimate(

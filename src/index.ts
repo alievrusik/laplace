@@ -1,29 +1,55 @@
 import { BudgetGuard } from "./budget/guard.js";
 import { ProjectBuilder } from "./builder/projectBuilder.js";
 import { loadConfig } from "./config/env.js";
-import { DeployManager } from "./deploy/vercel.js";
+import { createDeployProvider } from "./deploy/factory.js";
+import { DeploymentTelemetry } from "./deploy/telemetry.js";
 import { JobRunner } from "./jobs/runner.js";
+import { GigaChatFoundation } from "./llm/gigachat.js";
 import { LaplaceLlm } from "./llm/laplaceLlm.js";
 import { MemoryCatalog } from "./memory/catalog.js";
+import { ConversationOrchestrator } from "./orchestrator/conversationOrchestrator.js";
 import { GitSync } from "./provision/gitSync.js";
 import { ProjectProvisioner } from "./provision/github.js";
 import { ResourceEstimator } from "./resource/estimator.js";
 import { TelegramBot } from "./telegram/bot.js";
+import { MiniAppServer } from "./telegram/miniAppServer.js";
 
 async function main() {
   const config = loadConfig();
   const llm = new LaplaceLlm(config.laplaceLlm);
+  const gigachat = new GigaChatFoundation({
+    ...config.demoFoundation.gigachat,
+    rawEnv: config.demoFoundation.gigachat.raw,
+  });
   const memory = new MemoryCatalog(config.paths.memoryDir, llm);
+  const deploy = createDeployProvider(config);
+  const deploymentTelemetry = new DeploymentTelemetry({
+    deploy,
+    mcpEnabled: config.deploy.mcpEnabled,
+  });
+  const orchestrator = new ConversationOrchestrator({
+    llm,
+    cursorApiKey: config.cursor.apiKey,
+    runtimeCwd: process.cwd(),
+    briefModel: config.cursor.briefModel,
+    skepticModel: config.cursor.skepticModel,
+    memoryDir: config.paths.memoryDir,
+    surveyPath: "GenAI_Client_Survey_Final.xlsx",
+  });
   const jobs = new JobRunner();
 
   const bot = new TelegramBot({
     config,
     llm,
     memory,
+    orchestrator,
     estimator: new ResourceEstimator({
       llm,
       workspaceDir: config.paths.workspaceDir,
       memoryDir: config.paths.memoryDir,
+      cursorApiKey: config.cursor.apiKey,
+      runtimeCwd: process.cwd(),
+      modelId: config.cursor.estimatorModel,
     }),
     budget: new BudgetGuard(),
     jobs,
@@ -35,18 +61,28 @@ async function main() {
     }),
     gitSync: new GitSync(),
     builder: new ProjectBuilder(config.cursor),
-    deploy: new DeployManager(config.vercel),
+    deploy,
+    deploymentTelemetry,
+    gigachat,
+  });
+  const miniApp = new MiniAppServer({
+    bot,
+    port: config.telegram.miniApp.port,
+    baseUrl: config.telegram.miniApp.baseUrl,
   });
 
   process.once("SIGINT", () => {
+    void miniApp.stop();
     bot.stop("SIGINT");
     process.exit(0);
   });
   process.once("SIGTERM", () => {
+    void miniApp.stop();
     bot.stop("SIGTERM");
     process.exit(0);
   });
 
+  await miniApp.start();
   await bot.launch();
 }
 

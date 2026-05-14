@@ -1,3 +1,5 @@
+import type { DeployProvider, DeployStatusSnapshot } from "./provider.js";
+
 export interface VercelProject {
   id: string;
   name: string;
@@ -42,7 +44,9 @@ export class VercelDeploymentError extends Error {
   }
 }
 
-export class DeployManager {
+export class DeployManager implements DeployProvider {
+  readonly platform = "vercel" as const;
+
   constructor(
     private readonly config: {
       token: string;
@@ -77,7 +81,7 @@ export class DeployManager {
     return {
       id: data.id,
       name: data.name,
-      url: data.targets?.production?.url,
+      url: normalizeVercelUrl(data.targets?.production?.url),
     };
   }
 
@@ -95,11 +99,14 @@ export class DeployManager {
   async createDeployment(args: {
     projectName: string;
     gitSource: {
-      repoId: number;
+      repoId?: number;
       ref: string;
       type: "github";
     };
   }): Promise<VercelDeployment> {
+    if (!args.gitSource.repoId) {
+      throw new Error("Vercel deployment requires gitSource.repoId");
+    }
     const url = new URL("https://api.vercel.com/v13/deployments");
     if (this.config.teamId) url.searchParams.set("teamId", this.config.teamId);
 
@@ -229,6 +236,31 @@ export class DeployManager {
     return "deleted";
   }
 
+  async getProjectDeploymentStatus(projectName: string): Promise<DeployStatusSnapshot> {
+    try {
+      const project = await this.getProject(projectName);
+      const latest = await this.getLatestDeployment(project.id);
+      if (!latest) {
+        return {
+          deployUrl: project.url,
+          state: "unknown",
+          source: "vercel_api",
+        };
+      }
+
+      return {
+        deployUrl: latest.url,
+        state: mapVercelState(latest.state),
+        source: "vercel_api",
+      };
+    } catch {
+      return {
+        state: "unknown",
+        source: "vercel_api",
+      };
+    }
+  }
+
   private async getProject(name: string): Promise<VercelProject> {
     const url = new URL(`https://api.vercel.com/v9/projects/${encodeURIComponent(name)}`);
     if (this.config.teamId) url.searchParams.set("teamId", this.config.teamId);
@@ -238,7 +270,7 @@ export class DeployManager {
     return {
       id: data.id,
       name: data.name,
-      url: data.targets?.production?.url,
+      url: normalizeVercelUrl(data.targets?.production?.url),
     };
   }
 
@@ -261,6 +293,39 @@ export class DeployManager {
       state: data.readyState,
       errorMessage: data.errorMessage,
       inspectorUrl: data.inspectorUrl,
+    };
+  }
+
+  private async getLatestDeployment(projectId: string): Promise<VercelDeployment | undefined> {
+    const url = new URL("https://api.vercel.com/v6/deployments");
+    url.searchParams.set("projectId", projectId);
+    url.searchParams.set("limit", "1");
+    if (this.config.teamId) url.searchParams.set("teamId", this.config.teamId);
+
+    const response = await this.request(url, { method: "GET" });
+    const data = (await response.json()) as {
+      deployments?: Array<{
+        id: string;
+        uid?: string;
+        url?: string;
+        readyState?: string;
+        errorMessage?: string;
+        inspectorUrl?: string;
+      }>;
+    };
+    const deployment = data.deployments?.[0];
+    if (!deployment) return undefined;
+
+    return {
+      id: deployment.uid ?? deployment.id,
+      url: deployment.url
+        ? deployment.url.startsWith("http")
+          ? deployment.url
+          : `https://${deployment.url}`
+        : "",
+      state: deployment.readyState,
+      errorMessage: deployment.errorMessage,
+      inspectorUrl: deployment.inspectorUrl,
     };
   }
 
@@ -390,6 +455,14 @@ export class DeployManager {
   }
 }
 
+function mapVercelState(state?: string): "unknown" | "building" | "ready" | "error" {
+  if (!state) return "unknown";
+  const normalized = state.toUpperCase();
+  if (normalized === "READY") return "ready";
+  if (normalized === "ERROR" || normalized === "CANCELED") return "error";
+  return "building";
+}
+
 function isEnvConflictError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return message.includes("ENV_CONFLICT") || message.includes("already exists");
@@ -397,4 +470,9 @@ function isEnvConflictError(error: unknown): boolean {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeVercelUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  return value.startsWith("http") ? value : `https://${value}`;
 }
