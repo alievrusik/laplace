@@ -1,4 +1,5 @@
 import { Markup, Telegraf } from "telegraf";
+import { Agent, CursorAgentError } from "@cursor/sdk";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Context } from "telegraf";
@@ -58,6 +59,9 @@ type JobFlowState = {
 const MAX_DEPLOY_RECOVERY_ATTEMPTS = 2;
 const DEPLOY_HEALTHCHECK_TIMEOUT_MS = 15000;
 const HEARTBEAT_INTERVAL_MS = 60_000;
+const CHAT_CURSOR_CREATE_TIMEOUT_MS = 30_000;
+const CHAT_CURSOR_SEND_TIMEOUT_MS = 30_000;
+const CHAT_CURSOR_WAIT_TIMEOUT_MS = 120_000;
 const MINIAPP_MESSAGES_LIMIT = 300;
 const MINIAPP_NOTES_LIMIT = 120;
 const MEMORY_CLIENT_SLUG = "default-client";
@@ -1102,7 +1106,86 @@ export class TelegramBot {
       return sanitizeChatReply(response) || fallback;
     } catch (error) {
       console.error("Laplace chat reply failed", error);
-      return fallback;
+    }
+
+    const cursorFallback = await this.tryCursorChatReply({
+      profile,
+      project,
+      recentContext,
+      projectSummary,
+      message,
+    });
+    if (cursorFallback) return cursorFallback;
+
+    return fallback;
+  }
+
+  private async tryCursorChatReply(args: {
+    profile: UserProfile;
+    project: string;
+    recentContext: string;
+    projectSummary: string;
+    message: string;
+  }): Promise<string | undefined> {
+    const modelId = this.deps.config.cursor.briefModel || this.deps.config.cursor.builderModel || "composer-2-fast";
+    let agent: Awaited<ReturnType<typeof Agent.create>> | undefined;
+    try {
+      const createdAgent = await withTimeout(
+        Agent.create({
+          apiKey: this.deps.config.cursor.apiKey,
+          model: { id: modelId },
+          local: { cwd: process.cwd() },
+        }),
+        CHAT_CURSOR_CREATE_TIMEOUT_MS,
+        "Cursor fallback startup timed out",
+      );
+      agent = createdAgent;
+      const run = await withTimeout(
+        createdAgent.send(
+          [
+            "Ты — резервный chat-ассистент Laplace.",
+            "Отвечай на русском, спокойно и по делу, 2-5 предложений.",
+            "Не пиши про внутренние ошибки, ключи, инфраструктуру, Cursor SDK, OpenAI API.",
+            "Если данных не хватает — задай только один уточняющий вопрос.",
+            "",
+            `System prompt:\n${renderChatSystemPrompt(args.profile)}`,
+            "",
+            `Active project: ${args.project}`,
+            "",
+            `Project summary:\n${args.projectSummary || "(no summary)"}`,
+            "",
+            `Recent conversation:\n${args.recentContext || "(empty)"}`,
+            "",
+            `Latest user message:\n${args.message}`,
+          ].join("\n"),
+        ),
+        CHAT_CURSOR_SEND_TIMEOUT_MS,
+        "Cursor fallback send timed out",
+      );
+      const result = await withTimeout(
+        run.wait(),
+        CHAT_CURSOR_WAIT_TIMEOUT_MS,
+        "Cursor fallback response timed out",
+      );
+      if (result.status !== "finished") {
+        console.warn(`Cursor fallback finished with non-finished status: ${result.status}`);
+        return undefined;
+      }
+      const text = sanitizeChatReply(result.result ?? "");
+      return text || undefined;
+    } catch (error) {
+      if (error instanceof CursorAgentError) {
+        console.warn("Cursor fallback failed", error.message);
+      } else {
+        console.warn("Cursor fallback failed", error);
+      }
+      return undefined;
+    } finally {
+      if (agent) {
+        await agent[Symbol.asyncDispose]().catch((error) => {
+          console.warn("Cursor fallback dispose failed", error);
+        });
+      }
     }
   }
 
@@ -2540,6 +2623,20 @@ function summarizeDeleteError(error: unknown): string {
     return `error: ${error.message.slice(0, 200)}`;
   }
   return `error: ${String(error).slice(0, 200)}`;
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function sleep(ms: number): Promise<void> {
