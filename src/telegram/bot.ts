@@ -58,6 +58,9 @@ type JobFlowState = {
 const MAX_DEPLOY_RECOVERY_ATTEMPTS = 2;
 const DEPLOY_HEALTHCHECK_TIMEOUT_MS = 15000;
 const HEARTBEAT_INTERVAL_MS = 60_000;
+const MINIAPP_MESSAGES_LIMIT = 300;
+const MINIAPP_NOTES_LIMIT = 120;
+const MEMORY_CLIENT_SLUG = "default-client";
 
 export class TelegramBot {
   private readonly bot: Telegraf;
@@ -73,6 +76,9 @@ export class TelegramBot {
   private readonly artifactSnapshots = new Map<string, ProjectArtifactSnapshot>();
   private readonly miniAppMessages = new Map<string, MiniAppChatMessage[]>();
   private readonly jobProjectIndex = new Map<string, { userId: number; projectSlug: string }>();
+  private readonly loadedConversationKeys = new Set<string>();
+  private readonly loadingConversationKeys = new Map<string, Promise<void>>();
+  private readonly pendingConversationSaves = new Map<string, NodeJS.Timeout>();
   private capabilityTaxonomyCache:
     | { value: Awaited<ReturnType<ConversationOrchestrator["buildTaxonomy"]>>; loadedAt: number }
     | undefined;
@@ -122,6 +128,10 @@ export class TelegramBot {
       clearInterval(state.heartbeatTimer);
     }
     this.activeJobFlows.clear();
+    for (const timer of this.pendingConversationSaves.values()) {
+      clearTimeout(timer);
+    }
+    this.pendingConversationSaves.clear();
     this.bot.stop(signal);
   }
 
@@ -131,8 +141,13 @@ export class TelegramBot {
     mode: TelemetryMode;
   }> {
     const projects = await this.listKnownProjectsForUser(userId);
+    const activeProject = this.getActiveProject(userId) ?? projects[0];
+    if (activeProject && !this.getActiveProject(userId)) {
+      this.activeProjects.set(userId, activeProject);
+      this.addKnownProject(userId, activeProject);
+    }
     return {
-      activeProject: this.getActiveProject(userId),
+      activeProject,
       projects,
       mode: this.getTelemetryMode(userId),
     };
@@ -143,6 +158,7 @@ export class TelegramBot {
     if (!project) return "Некорректное имя project.";
     this.activeProjects.set(userId, project);
     this.addKnownProject(userId, project);
+    await this.ensureConversationStateLoaded(userId, project);
     return `Активный project: ${project}`;
   }
 
@@ -153,6 +169,7 @@ export class TelegramBot {
     const project = suggested || `project-${Date.now()}`;
     this.activeProjects.set(userId, project);
     this.addKnownProject(userId, project);
+    await this.ensureConversationStateLoaded(userId, project);
     return {
       dialogId: this.getConversationKey(userId, project),
       projectSlug: project,
@@ -169,22 +186,32 @@ export class TelegramBot {
     message: string;
     profile?: UserProfile;
   }): Promise<string> {
+    const projectSlug = slugify(args.projectSlug);
+    const message = args.message.trim();
+    if (!projectSlug) {
+      throw new Error("Некорректный projectSlug");
+    }
+    if (!message) {
+      throw new Error("Пустое сообщение");
+    }
+    await this.ensureConversationStateLoaded(args.userId, projectSlug);
+
     const profile = args.profile ?? this.profiles.get(args.userId) ?? this.deps.config.defaults.profile;
-    this.addKnownProject(args.userId, args.projectSlug);
-    this.activeProjects.set(args.userId, args.projectSlug);
-    this.addConversationNote(args.userId, args.projectSlug, args.message);
+    this.addKnownProject(args.userId, projectSlug);
+    this.activeProjects.set(args.userId, projectSlug);
+    this.addConversationNote(args.userId, projectSlug, message);
     this.appendMiniAppMessage({
       userId: args.userId,
-      projectSlug: args.projectSlug,
+      projectSlug,
       role: "user",
-      text: args.message,
+      text: message,
       isIntermediate: false,
       isFinal: true,
     });
-    const reply = await this.chatReply(args.userId, args.projectSlug, args.message, profile);
+    const reply = await this.chatReply(args.userId, projectSlug, message, profile);
     this.appendMiniAppMessage({
       userId: args.userId,
-      projectSlug: args.projectSlug,
+      projectSlug,
       role: "assistant",
       text: reply,
       sourceAgent: "agent_brief",
@@ -192,8 +219,8 @@ export class TelegramBot {
       isIntermediate: false,
       isFinal: true,
     });
-    const ctx = this.createVirtualContext(args.userId, args.projectSlug);
-    await this.maybeAutoAnalyze(ctx, args.projectSlug);
+    const ctx = this.createVirtualContext(args.userId, projectSlug);
+    await this.maybeAutoAnalyze(ctx, projectSlug);
     return reply;
   }
 
@@ -202,9 +229,14 @@ export class TelegramBot {
     projectSlug: string;
     inlineText?: string;
   }): Promise<boolean> {
-    this.activeProjects.set(args.userId, args.projectSlug);
-    const ctx = this.createVirtualContext(args.userId, args.projectSlug);
-    return this.analyzeProjectContext(ctx, args.projectSlug, args.inlineText ?? "", false);
+    const projectSlug = slugify(args.projectSlug);
+    if (!projectSlug) {
+      throw new Error("Некорректный projectSlug");
+    }
+    await this.ensureConversationStateLoaded(args.userId, projectSlug);
+    this.activeProjects.set(args.userId, projectSlug);
+    const ctx = this.createVirtualContext(args.userId, projectSlug);
+    return this.analyzeProjectContext(ctx, projectSlug, args.inlineText ?? "", false);
   }
 
   async miniAppConfirm(args: { userId: number }): Promise<string> {
@@ -221,16 +253,21 @@ export class TelegramBot {
   }
 
   async miniAppEstimate(args: { userId: number; projectSlug: string }): Promise<string> {
-    this.activeProjects.set(args.userId, args.projectSlug);
-    const notes = this.getProjectNotes(args.userId, args.projectSlug);
+    const projectSlug = slugify(args.projectSlug);
+    if (!projectSlug) {
+      throw new Error("Некорректный projectSlug");
+    }
+    await this.ensureConversationStateLoaded(args.userId, projectSlug);
+    this.activeProjects.set(args.userId, projectSlug);
+    const notes = this.getProjectNotes(args.userId, projectSlug);
     const estimate = await this.deps.estimator.estimateForProject({
-      projectSlug: args.projectSlug,
+      projectSlug,
       conversationNotes: notes,
     });
-    const output = formatEstimate(args.projectSlug, estimate);
+    const output = formatEstimate(projectSlug, estimate);
     this.appendMiniAppMessage({
       userId: args.userId,
-      projectSlug: args.projectSlug,
+      projectSlug,
       role: "assistant",
       text: output,
       sourceAgent: "agent_estimator",
@@ -241,8 +278,11 @@ export class TelegramBot {
     return output;
   }
 
-  miniAppGetMessages(args: { userId: number; projectSlug: string; limit?: number }): MiniAppChatMessage[] {
-    const key = this.getConversationKey(args.userId, args.projectSlug);
+  async miniAppGetMessages(args: { userId: number; projectSlug: string; limit?: number }): Promise<MiniAppChatMessage[]> {
+    const projectSlug = slugify(args.projectSlug);
+    if (!projectSlug) return [];
+    await this.ensureConversationStateLoaded(args.userId, projectSlug);
+    const key = this.getConversationKey(args.userId, projectSlug);
     const messages = this.miniAppMessages.get(key) ?? [];
     const limit = args.limit ?? 120;
     return messages.slice(-limit);
@@ -656,8 +696,55 @@ export class TelegramBot {
 
   private async listKnownProjectsForUser(userId: number): Promise<string[]> {
     const workspace = await this.listWorkspaceProjects();
+    const memoryProjects = await this.listMemoryProjects();
+    const fromDialogMemory = await this.listDialogProjectsForUser(userId);
     const known = [...(this.knownProjectsByUser.get(userId) ?? new Set<string>())];
-    return [...new Set([...workspace, ...known])].sort();
+    return [...new Set([...workspace, ...memoryProjects, ...fromDialogMemory, ...known])].sort();
+  }
+
+  private async listMemoryProjects(): Promise<string[]> {
+    const projectsDir = path.join(
+      this.deps.config.paths.memoryDir,
+      "clients",
+      MEMORY_CLIENT_SLUG,
+      "projects",
+    );
+    try {
+      const entries = await fs.readdir(projectsDir, { withFileTypes: true });
+      return entries
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+        .sort();
+    } catch {
+      return [];
+    }
+  }
+
+  private async listDialogProjectsForUser(userId: number): Promise<string[]> {
+    const projectsDir = path.join(
+      this.deps.config.paths.memoryDir,
+      "clients",
+      MEMORY_CLIENT_SLUG,
+      "projects",
+    );
+    const markerName = `user-${Math.trunc(userId)}.json`;
+    try {
+      const entries = await fs.readdir(projectsDir, { withFileTypes: true });
+      const matches = await Promise.all(entries
+        .filter((entry) => entry.isDirectory())
+        .map(async (entry) => {
+          const markerPath = path.join(projectsDir, entry.name, "dialogs", markerName);
+          try {
+            await fs.access(markerPath);
+            return entry.name;
+          } catch {
+            return undefined;
+          }
+        }));
+      return matches.filter((value): value is string => Boolean(value));
+    } catch {
+      return [];
+    }
   }
 
   private addKnownProject(userId: number, project: string): void {
@@ -732,8 +819,9 @@ export class TelegramBot {
     const key = this.getConversationKey(userId, project);
     const notes = this.projectConversations.get(key) ?? [];
     notes.push(message);
-    this.projectConversations.set(key, notes.slice(-40));
+    this.projectConversations.set(key, notes.slice(-MINIAPP_NOTES_LIMIT));
     this.addKnownProject(userId, project);
+    this.scheduleConversationStateSave(userId, project);
   }
 
   private async analyzeProjectContext(
@@ -930,6 +1018,21 @@ export class TelegramBot {
     }
     for (const key of this.projectConversations.keys()) {
       if (key.endsWith(`:${projectSlug}`)) this.projectConversations.delete(key);
+    }
+    for (const key of this.miniAppMessages.keys()) {
+      if (key.endsWith(`:${projectSlug}`)) this.miniAppMessages.delete(key);
+    }
+    for (const key of this.loadedConversationKeys) {
+      if (key.endsWith(`:${projectSlug}`)) this.loadedConversationKeys.delete(key);
+    }
+    for (const [key, pending] of this.loadingConversationKeys.entries()) {
+      if (key.endsWith(`:${projectSlug}`)) this.loadingConversationKeys.delete(key);
+      void pending;
+    }
+    for (const [key, timer] of this.pendingConversationSaves.entries()) {
+      if (!key.endsWith(`:${projectSlug}`)) continue;
+      clearTimeout(timer);
+      this.pendingConversationSaves.delete(key);
     }
     for (const [userId, pending] of this.pendingConfirmations.entries()) {
       if (pending.projectSlug === projectSlug) this.pendingConfirmations.delete(userId);
@@ -1888,7 +1991,80 @@ export class TelegramBot {
       isFinal: args.isFinal,
       createdAt: new Date().toISOString(),
     });
-    this.miniAppMessages.set(key, messages.slice(-300));
+    this.miniAppMessages.set(key, messages.slice(-MINIAPP_MESSAGES_LIMIT));
+    this.scheduleConversationStateSave(args.userId, args.projectSlug);
+  }
+
+  private async ensureConversationStateLoaded(userId: number, projectSlug: string): Promise<void> {
+    const key = this.getConversationKey(userId, projectSlug);
+    if (this.loadedConversationKeys.has(key)) return;
+
+    const pending = this.loadingConversationKeys.get(key);
+    if (pending) {
+      await pending;
+      return;
+    }
+
+    const loader = (async () => {
+      const stored = await this.deps.memory.readDialogState({
+        clientSlug: MEMORY_CLIENT_SLUG,
+        projectSlug,
+        userId,
+      });
+      if (stored.notes.length) {
+        this.projectConversations.set(key, stored.notes.slice(-MINIAPP_NOTES_LIMIT));
+      }
+      if (stored.messages.length) {
+        this.miniAppMessages.set(key, stored.messages.slice(-MINIAPP_MESSAGES_LIMIT));
+      }
+      this.loadedConversationKeys.add(key);
+      this.addKnownProject(userId, projectSlug);
+    })().finally(() => {
+      this.loadingConversationKeys.delete(key);
+    });
+
+    this.loadingConversationKeys.set(key, loader);
+    await loader;
+  }
+
+  private scheduleConversationStateSave(userId: number, projectSlug: string): void {
+    const key = this.getConversationKey(userId, projectSlug);
+    const existingTimer = this.pendingConversationSaves.get(key);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+    }
+    const timer = setTimeout(() => {
+      void this.persistConversationState(key);
+    }, 200);
+    this.pendingConversationSaves.set(key, timer);
+  }
+
+  private async persistConversationState(key: string): Promise<void> {
+    this.pendingConversationSaves.delete(key);
+    const parsed = this.parseConversationKey(key);
+    if (!parsed) return;
+    const notes = this.projectConversations.get(key) ?? [];
+    const messages = this.miniAppMessages.get(key) ?? [];
+    try {
+      await this.deps.memory.writeDialogState({
+        clientSlug: MEMORY_CLIENT_SLUG,
+        projectSlug: parsed.projectSlug,
+        userId: parsed.userId,
+        notes: notes.slice(-MINIAPP_NOTES_LIMIT),
+        messages: messages.slice(-MINIAPP_MESSAGES_LIMIT),
+      });
+    } catch (error) {
+      console.warn(`Failed to persist dialog state for ${key}`, error);
+    }
+  }
+
+  private parseConversationKey(key: string): { userId: number; projectSlug: string } | undefined {
+    const separatorIndex = key.indexOf(":");
+    if (separatorIndex <= 0) return undefined;
+    const userId = Number(key.slice(0, separatorIndex));
+    const projectSlug = key.slice(separatorIndex + 1);
+    if (!Number.isFinite(userId) || userId <= 0 || !projectSlug) return undefined;
+    return { userId, projectSlug };
   }
 
   private updateArtifactSnapshot(

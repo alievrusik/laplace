@@ -75,7 +75,7 @@ export class MiniAppServer {
         const userId = Number(requestUrl.searchParams.get("userId"));
         assertValidUserId(userId);
         const projectSlug = String(requestUrl.searchParams.get("projectSlug") ?? "");
-        const messages = this.deps.bot.miniAppGetMessages({ userId, projectSlug });
+        const messages = await this.deps.bot.miniAppGetMessages({ userId, projectSlug });
         this.sendJson(res, 200, { messages });
         return;
       }
@@ -165,31 +165,6 @@ export class MiniAppServer {
         return;
       }
 
-      if (method === "POST" && requestUrl.pathname === "/api/gigachat/embed") {
-        const body = await readJsonBody(req);
-        assertValidUserId(Number(body.userId));
-        const result = await this.deps.bot.miniAppGigaChatEmbed({
-          userId: Number(body.userId),
-          projectSlug: String(body.projectSlug ?? ""),
-          text: String(body.text ?? ""),
-        });
-        this.sendJson(res, 200, { result });
-        return;
-      }
-
-      if (method === "POST" && requestUrl.pathname === "/api/gigachat/stt") {
-        const body = await readJsonBody(req);
-        assertValidUserId(Number(body.userId));
-        const result = await this.deps.bot.miniAppGigaChatStt({
-          userId: Number(body.userId),
-          projectSlug: String(body.projectSlug ?? ""),
-          audioBase64: String(body.audioBase64 ?? ""),
-          sourceAudioRef: body.sourceAudioRef ? String(body.sourceAudioRef) : undefined,
-        });
-        this.sendJson(res, 200, { result });
-        return;
-      }
-
       this.sendJson(res, 404, { error: "not_found" });
     } catch (error) {
       this.sendJson(res, 500, {
@@ -241,17 +216,22 @@ function renderMiniAppHtml(baseUrl?: string): string {
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Laplace Mini App</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     body { margin: 0; font-family: Arial, sans-serif; background: #0f172a; color: #e2e8f0; }
     .root { display: grid; grid-template-columns: 1fr 320px; min-height: 100vh; }
     .chat { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
     .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     input, textarea, select, button { border-radius: 8px; border: 1px solid #334155; background: #111827; color: #e2e8f0; padding: 8px; }
+    textarea { resize: vertical; min-height: 64px; }
     button { cursor: pointer; }
     .messages { flex: 1; overflow: auto; border: 1px solid #334155; border-radius: 12px; padding: 12px; background: #020617; }
     .msg { margin-bottom: 8px; padding: 8px; border-radius: 8px; background: #1e293b; }
     .aside { border-left: 1px solid #334155; padding: 16px; background: #0b1220; }
     .artifact { border: 1px solid #334155; border-radius: 12px; padding: 10px; background: #111827; }
+    .status { min-height: 18px; }
+    .status.error { color: #fda4af; }
+    .status.ok { color: #86efac; }
     .small { font-size: 12px; opacity: .8; }
   </style>
 </head>
@@ -271,13 +251,12 @@ function renderMiniAppHtml(baseUrl?: string): string {
       <button onclick="runAnalyze()">analyze</button>
       <button onclick="runConfirm()">confirm</button>
       <button onclick="runEstimate()">estimate</button>
-      <button onclick="runGigaEmbed()">gigachat embed</button>
-      <button onclick="runGigaStt()">gigachat stt (base64)</button>
     </div>
     <div id="messages" class="messages"></div>
+    <div id="status" class="status small"></div>
     <div class="row">
       <textarea id="message" rows="3" style="flex:1" placeholder="Message"></textarea>
-      <button onclick="sendMessage()">send</button>
+      <button id="sendBtn" onclick="sendMessage()">send</button>
     </div>
   </div>
     <div class="aside">
@@ -292,74 +271,55 @@ function renderMiniAppHtml(baseUrl?: string): string {
 <script>
 const baseUrl = ${JSON.stringify(baseUrl ?? "")};
 const resolvedBaseUrl = baseUrl || window.location.origin;
+let sendingMessage = false;
+
+function setStatus(text, isError = false) {
+  const root = document.getElementById("status");
+  root.textContent = text || "";
+  root.className = isError ? "status small error" : "status small ok";
+}
+
+function setSendingState(isSending) {
+  sendingMessage = isSending;
+  document.getElementById("sendBtn").disabled = isSending;
+  document.getElementById("message").disabled = isSending;
+}
+
 async function api(path, options={}) {
+  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
   const res = await fetch(resolvedBaseUrl + path, {
-    headers: { "Content-Type": "application/json" },
+    headers,
     ...options
   });
-  return res.json();
+  const raw = await res.text();
+  let data = {};
+  if (raw) {
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      data = { message: raw };
+    }
+  }
+  if (!res.ok) {
+    const message = data && data.message ? String(data.message) : "HTTP " + res.status;
+    throw new Error(message);
+  }
+  return data;
 }
 function getUserId() { return Number(document.getElementById("userId").value || "0"); }
 function getProject() { return document.getElementById("project").value.trim(); }
-async function loadState() {
-  const userId = getUserId();
-  if (!userId) return;
-  const state = await api("/api/dialog/state?userId=" + encodeURIComponent(userId));
-  document.getElementById("dialogs").textContent = JSON.stringify(state, null, 2);
-  if (state.activeProject) document.getElementById("project").value = state.activeProject;
-  await refreshMessages();
-  await refreshArtifact();
-}
-async function createDialog() {
-  const data = await api("/api/dialog/new", { method: "POST", body: JSON.stringify({ userId: getUserId(), projectSlug: getProject() }) });
-  document.getElementById("project").value = data.projectSlug;
-  await loadState();
-}
-async function switchProject() {
-  await api("/api/dialog/switch", { method: "POST", body: JSON.stringify({ userId: getUserId(), projectSlug: getProject() }) });
-  await loadState();
-}
-async function setMode() {
-  await api("/api/mode", { method: "POST", body: JSON.stringify({ userId: getUserId(), mode: document.getElementById("mode").value }) });
-}
-async function sendMessage() {
-  const message = document.getElementById("message").value.trim();
-  if (!message) return;
-  await api("/api/chat/send", { method: "POST", body: JSON.stringify({ userId: getUserId(), projectSlug: getProject(), message }) });
-  document.getElementById("message").value = "";
-  await refreshMessages();
-}
-async function runAnalyze() {
-  await api("/api/action/analyze", { method: "POST", body: JSON.stringify({ userId: getUserId(), projectSlug: getProject() }) });
-  await refreshMessages();
-}
-async function runConfirm() {
-  await api("/api/action/confirm", { method: "POST", body: JSON.stringify({ userId: getUserId() }) });
-  await refreshMessages();
-  await refreshArtifact();
-}
-async function runEstimate() {
-  await api("/api/action/estimate", { method: "POST", body: JSON.stringify({ userId: getUserId(), projectSlug: getProject() }) });
-  await refreshMessages();
-}
-async function runGigaEmbed() {
-  const text = document.getElementById("message").value.trim();
-  await api("/api/gigachat/embed", { method: "POST", body: JSON.stringify({ userId: getUserId(), projectSlug: getProject(), text }) });
-  await refreshMessages();
-}
-async function runGigaStt() {
-  const audioBase64 = document.getElementById("message").value.trim();
-  await api("/api/gigachat/stt", { method: "POST", body: JSON.stringify({ userId: getUserId(), projectSlug: getProject(), audioBase64 }) });
-  await refreshMessages();
-}
-async function refreshMessages() {
+function ensureContext() {
   const userId = getUserId();
   const projectSlug = getProject();
-  if (!userId || !projectSlug) return;
-  const data = await api("/api/messages?userId=" + encodeURIComponent(userId) + "&projectSlug=" + encodeURIComponent(projectSlug));
+  if (!userId) throw new Error("Укажи userId.");
+  if (!projectSlug) throw new Error("Укажи project slug.");
+  return { userId, projectSlug };
+}
+
+function renderMessages(messages) {
   const root = document.getElementById("messages");
   root.innerHTML = "";
-  for (const msg of data.messages || []) {
+  for (const msg of messages || []) {
     const el = document.createElement("div");
     el.className = "msg";
     const src = msg.sourceAgent ? "[" + msg.sourceAgent + "] " : "";
@@ -367,6 +327,134 @@ async function refreshMessages() {
     root.appendChild(el);
   }
   root.scrollTop = root.scrollHeight;
+}
+
+function renderDialogs(state) {
+  const root = document.getElementById("dialogs");
+  const projects = Array.isArray(state.projects) ? state.projects : [];
+  if (!projects.length) {
+    root.textContent = "Пока нет проектов.";
+    return;
+  }
+  const lines = projects.map((project) => (project === state.activeProject ? "● " : "○ ") + project);
+  root.textContent = lines.join("\\n");
+}
+
+async function loadState() {
+  try {
+    const userId = getUserId();
+    if (!userId) {
+      setStatus("Добавь userId для загрузки состояния.");
+      return;
+    }
+    const state = await api("/api/dialog/state?userId=" + encodeURIComponent(userId));
+    renderDialogs(state);
+    if (state.activeProject) {
+      document.getElementById("project").value = state.activeProject;
+    } else if (!getProject() && Array.isArray(state.projects) && state.projects.length) {
+      document.getElementById("project").value = String(state.projects[0]);
+    }
+    if (getProject()) {
+      await refreshMessages();
+      await refreshArtifact();
+      await refreshWorkflow();
+    }
+    setStatus("Состояние обновлено.");
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), true);
+  }
+}
+async function createDialog() {
+  try {
+    const userId = getUserId();
+    if (!userId) throw new Error("Укажи userId.");
+    const data = await api("/api/dialog/new", { method: "POST", body: JSON.stringify({ userId, projectSlug: getProject() }) });
+    document.getElementById("project").value = data.projectSlug;
+    await loadState();
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), true);
+  }
+}
+async function switchProject() {
+  try {
+    const ctx = ensureContext();
+    await api("/api/dialog/switch", { method: "POST", body: JSON.stringify(ctx) });
+    await loadState();
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), true);
+  }
+}
+async function setMode() {
+  try {
+    const userId = getUserId();
+    if (!userId) throw new Error("Укажи userId.");
+    await api("/api/mode", { method: "POST", body: JSON.stringify({ userId, mode: document.getElementById("mode").value }) });
+    setStatus("Режим обновлен.");
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), true);
+  }
+}
+async function sendMessage() {
+  if (sendingMessage) return;
+  const message = document.getElementById("message").value.trim();
+  if (!message) return;
+  try {
+    const ctx = ensureContext();
+    setSendingState(true);
+    setStatus("Отправляю сообщение...");
+    await api("/api/chat/send", { method: "POST", body: JSON.stringify({ ...ctx, message }) });
+    document.getElementById("message").value = "";
+    await refreshMessages();
+    await refreshWorkflow();
+    setStatus("Ответ получен.");
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), true);
+  } finally {
+    setSendingState(false);
+  }
+}
+async function runAnalyze() {
+  try {
+    const ctx = ensureContext();
+    setStatus("Запускаю analyze...");
+    await api("/api/action/analyze", { method: "POST", body: JSON.stringify(ctx) });
+    await refreshMessages();
+    await refreshWorkflow();
+    setStatus("Analyze запущен.");
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), true);
+  }
+}
+async function runConfirm() {
+  try {
+    const userId = getUserId();
+    if (!userId) throw new Error("Укажи userId.");
+    setStatus("Подтверждаю запуск...");
+    await api("/api/action/confirm", { method: "POST", body: JSON.stringify({ userId }) });
+    await refreshMessages();
+    await refreshArtifact();
+    await refreshWorkflow();
+    setStatus("Запуск подтвержден.");
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), true);
+  }
+}
+async function runEstimate() {
+  try {
+    const ctx = ensureContext();
+    setStatus("Считаю estimate...");
+    await api("/api/action/estimate", { method: "POST", body: JSON.stringify(ctx) });
+    await refreshMessages();
+    await refreshWorkflow();
+    setStatus("Estimate готов.");
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), true);
+  }
+}
+async function refreshMessages() {
+  const ctx = ensureContext();
+  const data = await api("/api/messages?userId=" + encodeURIComponent(ctx.userId) + "&projectSlug=" + encodeURIComponent(ctx.projectSlug));
+  renderMessages(data.messages || []);
 }
 async function refreshArtifact() {
   const projectSlug = getProject();
@@ -381,7 +469,52 @@ async function refreshWorkflow() {
   const tail = (data.events || []).slice(-8);
   document.getElementById("workflow").textContent = JSON.stringify(tail, null, 2);
 }
-setInterval(() => { refreshMessages(); refreshArtifact(); refreshWorkflow(); }, 5000);
+
+function bindMessageHotkeys() {
+  const textarea = document.getElementById("message");
+  textarea.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void sendMessage();
+    }
+  });
+}
+
+function initTelegramUserId() {
+  const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : undefined;
+  if (!tg) return;
+  try {
+    tg.ready();
+    if (typeof tg.expand === "function") tg.expand();
+    const telegramUserId = Number(tg.initDataUnsafe && tg.initDataUnsafe.user ? tg.initDataUnsafe.user.id : 0);
+    if (telegramUserId > 0 && !getUserId()) {
+      document.getElementById("userId").value = String(telegramUserId);
+      setStatus("userId подставлен из Telegram.");
+    }
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), true);
+  }
+}
+
+async function refreshLoop() {
+  try {
+    if (!getUserId() || !getProject()) return;
+    await refreshMessages();
+    await refreshArtifact();
+    await refreshWorkflow();
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), true);
+  }
+}
+
+async function bootstrap() {
+  initTelegramUserId();
+  bindMessageHotkeys();
+  await loadState();
+}
+
+void bootstrap();
+setInterval(() => { void refreshLoop(); }, 5000);
 </script>
 </body></html>`;
 }

@@ -1,7 +1,13 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { PrototypeMatch } from "../domain/types.js";
+import type { MiniAppChatMessage, PrototypeMatch } from "../domain/types.js";
 import type { LaplaceLlm } from "../llm/laplaceLlm.js";
+
+type DialogStatePayload = {
+  notes: string[];
+  messages: MiniAppChatMessage[];
+  updatedAt: string;
+};
 
 export class MemoryCatalog {
   constructor(
@@ -114,6 +120,51 @@ export class MemoryCatalog {
     return combined.length > limit ? `${combined.slice(0, limit)}\n...(truncated)` : combined;
   }
 
+  async readDialogState(args: {
+    clientSlug: string;
+    projectSlug: string;
+    userId: number;
+  }): Promise<{ notes: string[]; messages: MiniAppChatMessage[] }> {
+    const filePath = this.getDialogStatePath(args);
+    const raw = await this.readTextIfExists(filePath);
+    if (!raw) return { notes: [], messages: [] };
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { notes: [], messages: [] };
+    }
+
+    if (!parsed || typeof parsed !== "object") {
+      return { notes: [], messages: [] };
+    }
+
+    const payload = parsed as Partial<DialogStatePayload>;
+    const notes = Array.isArray(payload.notes) ? payload.notes.map(String).filter(Boolean).slice(-120) : [];
+    const messages = Array.isArray(payload.messages)
+      ? payload.messages.filter(isMiniAppChatMessage).slice(-300)
+      : [];
+    return { notes, messages };
+  }
+
+  async writeDialogState(args: {
+    clientSlug: string;
+    projectSlug: string;
+    userId: number;
+    notes: string[];
+    messages: MiniAppChatMessage[];
+  }): Promise<void> {
+    const filePath = this.getDialogStatePath(args);
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    const payload: DialogStatePayload = {
+      notes: args.notes.slice(-120),
+      messages: args.messages.slice(-300),
+      updatedAt: new Date().toISOString(),
+    };
+    await fs.writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  }
+
   private async readPrototypeCards(): Promise<Array<{ slug: string; body: string }>> {
     const dir = path.join(this.memoryDir, "prototypes");
     const entries = await fs.readdir(dir, { withFileTypes: true });
@@ -135,4 +186,36 @@ export class MemoryCatalog {
       throw error;
     }
   }
+
+  private getDialogStatePath(args: {
+    clientSlug: string;
+    projectSlug: string;
+    userId: number;
+  }): string {
+    return path.join(
+      this.memoryDir,
+      "clients",
+      args.clientSlug,
+      "projects",
+      args.projectSlug,
+      "dialogs",
+      `user-${Math.trunc(args.userId)}.json`,
+    );
+  }
+}
+
+function isMiniAppChatMessage(value: unknown): value is MiniAppChatMessage {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<MiniAppChatMessage>;
+  const hasRole = candidate.role === "user" || candidate.role === "assistant" || candidate.role === "system";
+  return Boolean(
+    typeof candidate.id === "string" &&
+      typeof candidate.dialogId === "string" &&
+      typeof candidate.projectSlug === "string" &&
+      hasRole &&
+      typeof candidate.text === "string" &&
+      typeof candidate.createdAt === "string" &&
+      typeof candidate.isIntermediate === "boolean" &&
+      typeof candidate.isFinal === "boolean",
+  );
 }
