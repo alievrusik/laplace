@@ -12,7 +12,7 @@
     "test:runtime-harness": "tsx src/testing/runRuntimeHarness.ts",
     "test:regressions": "tsx src/testing/runRegressions.ts",
     "migrate:render": "tsx src/scripts/migrateVercelToRender.ts",
-    "start": "node dist/index.js"
+    "start": "node dist/src/index.js"
   },
   "dependencies": {
     "@cursor/sdk": "latest",
