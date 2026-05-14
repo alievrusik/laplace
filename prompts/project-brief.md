@@ -5,6 +5,7 @@ Convert a messy conversation into a structured AI/ML prototype brief.
 Focus on:
 
 - what input data the user has or can provide;
+- at requirements-gathering stage, assume the user does not provide real files/datasets yet; capture expected input format and note this limitation in constraints;
 - what output the user wants;
 - the fastest web demo that can transform that input into that output using one or more configured foundation providers.
 - whether a segmentation/localization flow is needed; if so, Segmind SAM3 Image is available for promptable image segmentation/detection, and SAM3 Video can be considered only for video segmentation/tracking.

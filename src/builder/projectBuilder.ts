@@ -29,7 +29,7 @@ export class ProjectBuilder {
     },
     runtime?: AgentRuntime,
   ) {
-    const fallbackModel = config.model ?? "composer-2-fast";
+    const fallbackModel = config.model ?? "composer-2";
     this.builderModelId = config.builderModel ?? fallbackModel;
     this.testerModelId = config.testerModel ?? config.evaluatorModel ?? this.builderModelId;
     this.revisorModelId = config.revisorModel ?? this.testerModelId;

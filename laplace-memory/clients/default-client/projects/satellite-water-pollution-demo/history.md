@@ -16,3 +16,13 @@ Notes:
 - Конфликт/рассинхрон артефактов `.next` между `next build` и `next dev` может снова сломать dev до ручной очистки каталога.
 - Сегментация в mock без ключа не проверяет живой ответ Segmind; для полного e2e нужен валидный `SEGMIND_API_KEY`.
 - npm audit сообщает 2 moderate (transitive; в README уже отмечено ограничение fix без force).
+
+---
+
+## 2026-05-14T14:18:03.423Z - migration
+Project: satellite-water-pollution-demo
+Summary: Deployment migrated from Vercel to Render.
+Previous deploy: https://satellite-water-pollution-demo-hsvp83yjj-alievrusiks-projects.vercel.app
+Current deploy: https://laplace-subprojects-satellite-water.onrender.com
+Notes:
+- Vercel resources are kept as legacy fallback.

@@ -19,6 +19,7 @@ const MAX_SOURCE_CHARS = 6000;
 const AGENT_CREATE_TIMEOUT_MS = 60 * 1000;
 const AGENT_SEND_TIMEOUT_MS = 60 * 1000;
 const AGENT_WAIT_TIMEOUT_MS = 2 * 60 * 1000;
+const MIN_FEASIBLE_CONFIDENCE = 40;
 
 export class ConversationOrchestrator {
   private readonly runtime: AgentRuntime;
@@ -229,6 +230,8 @@ Important:
 - Your main job is to quickly identify the user's input data and desired output.
 - Convert that into the fastest web demo where a configured foundation model transforms the input into the output.
 - Prefer a foundation-model prototype when there is no dataset, no training plan, or the user wants a quick demo.
+- At the current requirements-gathering stage, assume the user does not provide real files/datasets yet; describe expected input format and explicitly capture this in constraints.
+- Never require client-provided input data as a hard prerequisite for MVP kickoff. If data is missing, still produce a buildable brief using placeholder/demo inputs and public/sample data for initial smoke validation.
 - Foundation providers: do not recommend or assume that all available foundation models must be used. Infer which providers (sam3, anthropic, vllm, etc.) are actually needed to fulfill the user's task and list only those in recommendedFoundationProviders; omit providers that add no necessary capability.
 - The prototype should be simple: upload/paste/provide input, call a server-side foundation model, show structured output.
 - Do not overstate accuracy. If the user asks for "maximum accuracy" but there is no labeled dataset, frame this as calibrated prototype output with limitations.
@@ -253,7 +256,7 @@ Expected JSON shape:
   "taskType": "vision",
   "recommendedFoundationProviders": ["anthropic"],
   "deliverables": ["Web demo", "server-side vision API route", "README", "prototype.md"],
-  "constraints": ["No dataset is available", "Use foundation model only for MVP", "One static image at a time", "Score is not a calibrated production metric"]
+  "constraints": ["User does not provide real data yet at requirements-gathering stage", "No dataset is available", "Use foundation model only for MVP", "One static image at a time", "Score is not a calibrated production metric"]
 }`;
 }
 
@@ -383,7 +386,10 @@ function normalizeFeasibility(
 ): FeasibilityAssessment {
   const verdict = normalizeVerdict(raw.verdict, fallback.verdict);
   const action = normalizeAction(raw.action, fallback.action, verdict);
-  const confidence = clampConfidence(raw.confidence, fallback.confidence);
+  const normalizedConfidence = clampConfidence(raw.confidence, fallback.confidence);
+  const confidence = verdict === "feasible_now"
+    ? Math.max(MIN_FEASIBLE_CONFIDENCE, normalizedConfidence)
+    : normalizedConfidence;
   const blockers = toStringArray(raw.blockers);
   const scopeAdjustments = toStringArray(raw.scopeAdjustments);
 

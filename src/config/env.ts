@@ -52,8 +52,8 @@ const envSchema = z.object({
     .transform((value) => value === "true"),
 
   CURSOR_API_KEY: z.string().min(1),
-  CURSOR_BUILDER_MODEL: z.string().default("composer-2-fast"),
-  CURSOR_TESTER_MODEL: z.string().default("composer-2-fast"),
+  CURSOR_BUILDER_MODEL: z.string().default("composer-2"),
+  CURSOR_TESTER_MODEL: z.string().default("composer-2"),
   CURSOR_BRIEF_MODEL: optionalString,
   CURSOR_SKEPTIC_MODEL: optionalString,
   CURSOR_ESTIMATOR_MODEL: optionalString,

@@ -62,6 +62,7 @@ const HEARTBEAT_INTERVAL_MS = 60_000;
 const CHAT_CURSOR_CREATE_TIMEOUT_MS = 30_000;
 const CHAT_CURSOR_SEND_TIMEOUT_MS = 30_000;
 const CHAT_CURSOR_WAIT_TIMEOUT_MS = 120_000;
+const TELEGRAM_MESSAGE_LIMIT = 3900;
 const MINIAPP_MESSAGES_LIMIT = 300;
 const MINIAPP_NOTES_LIMIT = 120;
 const MEMORY_CLIENT_SLUG = "default-client";
@@ -74,7 +75,6 @@ export class TelegramBot {
   private readonly activeProjects = new Map<number, string>();
   private readonly pendingConfirmations = new Map<number, PendingAction>();
   private readonly pendingDeletes = new Map<number, string>();
-  private readonly autoAnalyzeCheckpoint = new Map<string, number>();
   private readonly telemetryModes = new Map<number, TelemetryMode>();
   private readonly activeJobFlows = new Map<string, JobFlowState>();
   private readonly artifactSnapshots = new Map<string, ProjectArtifactSnapshot>();
@@ -223,8 +223,6 @@ export class TelegramBot {
       isIntermediate: false,
       isFinal: true,
     });
-    const ctx = this.createVirtualContext(args.userId, projectSlug);
-    await this.maybeAutoAnalyze(ctx, projectSlug);
     return reply;
   }
 
@@ -682,7 +680,6 @@ export class TelegramBot {
         isFinal: true,
       });
       await ctx.reply(reply);
-      await this.maybeAutoAnalyze(ctx, activeProject);
     });
   }
 
@@ -870,7 +867,8 @@ export class TelegramBot {
         brief,
       });
 
-      await ctx.reply(
+      await this.replyLongText(
+        ctx,
         [
           autoTriggered ? "Авто-analyze: контекст проекта собран, подготовил update-запрос." : undefined,
           "Режим: update existing project",
@@ -932,7 +930,8 @@ export class TelegramBot {
               .join("\n")
           : "Похожих прототипов не нашел.";
 
-      await ctx.reply(
+      await this.replyLongText(
+        ctx,
         [
           autoTriggered ? "Авто-analyze: контекст уже достаточно понятен, собрал задачу автоматически." : undefined,
           "Режим: create new project",
@@ -975,7 +974,6 @@ export class TelegramBot {
 
     if (feasibility.action !== "confirm") {
       this.pendingConfirmations.delete(userId);
-      this.autoAnalyzeCheckpoint.set(this.getConversationKey(userId, activeProject), notes.length);
       return false;
     }
 
@@ -985,27 +983,7 @@ export class TelegramBot {
       source: pendingSource,
       mode: projectExists ? "update" : "create",
     });
-    this.autoAnalyzeCheckpoint.set(this.getConversationKey(userId, activeProject), notes.length);
     return true;
-  }
-
-  private async maybeAutoAnalyze(ctx: Context, activeProject: string): Promise<void> {
-    if (!ctx.from?.id) return;
-    if (this.pendingConfirmations.has(ctx.from.id) || this.pendingDeletes.has(ctx.from.id)) return;
-
-    const notes = this.getProjectNotes(ctx.from.id, activeProject);
-    if (notes.length < 3) return;
-
-    const key = this.getConversationKey(ctx.from.id, activeProject);
-    const checkpoint = this.autoAnalyzeCheckpoint.get(key) ?? 0;
-    if (notes.length <= checkpoint) return;
-
-    const joined = notes.join("\n");
-    const hasInputSignal = /вход|input|загруз|ввод|текст|фото|изображ|данн|файл/i.test(joined);
-    const hasOutputSignal = /выход|output|показ|верн|результ|оцен|отчет|summary|json/i.test(joined);
-    if (!hasInputSignal || !hasOutputSignal) return;
-
-    await this.analyzeProjectContext(ctx, activeProject, "", true);
   }
 
   private async projectExists(projectSlug: string): Promise<boolean> {
@@ -1127,7 +1105,7 @@ export class TelegramBot {
     projectSummary: string;
     message: string;
   }): Promise<string | undefined> {
-    const modelId = this.deps.config.cursor.briefModel || this.deps.config.cursor.builderModel || "composer-2-fast";
+    const modelId = this.deps.config.cursor.briefModel || this.deps.config.cursor.builderModel || "composer-2";
     let agent: Awaited<ReturnType<typeof Agent.create>> | undefined;
     try {
       const createdAgent = await withTimeout(
@@ -1782,6 +1760,12 @@ export class TelegramBot {
     });
   }
 
+  private async replyLongText(ctx: Context, text: string): Promise<void> {
+    for (const chunk of splitTelegramText(text, TELEGRAM_MESSAGE_LIMIT)) {
+      await ctx.reply(chunk);
+    }
+  }
+
   private stopJobFlow(jobId: string): void {
     const state = this.activeJobFlows.get(jobId);
     if (!state) return;
@@ -2408,6 +2392,13 @@ function formatFeasibilityHints(assessment: FeasibilityAssessment): string[] {
   if (assessment.oneClarifyingQuestion) {
     lines.push(`Уточняющий вопрос: ${assessment.oneClarifyingQuestion}`);
   }
+  if (assessment.action !== "confirm") {
+    lines.push("Как разблокировать /confirm (ответь одним сообщением):");
+    lines.push("- Вход: что именно пользователь загружает/вводит в MVP (1-2 пункта).");
+    lines.push("- Выход: что именно приложение возвращает/показывает (1-2 пункта).");
+    lines.push("- Ограничение MVP: что убираем на потом (точность, авто-решения, сложные режимы).");
+    lines.push("- Формулировка: \"Это демо-режим, без гарантии медицинской/полевой точности\".");
+  }
   return lines;
 }
 
@@ -2768,6 +2759,56 @@ function looksLikeBootstrapMemory(text: string): boolean {
 
 function truncateText(text: string, maxChars: number): string {
   return text.length > maxChars ? `${text.slice(0, maxChars)}\n...(truncated)` : text;
+}
+
+function splitTelegramText(text: string, maxChars: number): string[] {
+  if (!text || text.length <= maxChars) return [text];
+
+  const chunks: string[] = [];
+  let current = "";
+  const paragraphs = text.split("\n\n");
+
+  const pushCurrent = () => {
+    const trimmed = current.trim();
+    if (trimmed) chunks.push(trimmed);
+    current = "";
+  };
+
+  for (const paragraph of paragraphs) {
+    const candidate = current ? `${current}\n\n${paragraph}` : paragraph;
+    if (candidate.length <= maxChars) {
+      current = candidate;
+      continue;
+    }
+
+    if (current) pushCurrent();
+    if (paragraph.length <= maxChars) {
+      current = paragraph;
+      continue;
+    }
+
+    const lines = paragraph.split("\n");
+    for (const line of lines) {
+      const lineCandidate = current ? `${current}\n${line}` : line;
+      if (lineCandidate.length <= maxChars) {
+        current = lineCandidate;
+        continue;
+      }
+
+      if (current) pushCurrent();
+      if (line.length <= maxChars) {
+        current = line;
+        continue;
+      }
+
+      for (let index = 0; index < line.length; index += maxChars) {
+        chunks.push(line.slice(index, index + maxChars));
+      }
+    }
+  }
+
+  if (current) pushCurrent();
+  return chunks.length ? chunks : [text.slice(0, maxChars)];
 }
 
 function extractFirstUrlByLabel(text: string | undefined, label: string): string | undefined {

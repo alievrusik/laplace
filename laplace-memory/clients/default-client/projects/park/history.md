@@ -11,3 +11,13 @@ Notes:
 - Поведение с реальным ANTHROPIC_API_KEY и корпоративным MITM/самоподписанным сертификатом без корректного ANTHROPIC_PROXY_CA_CERT_BASE64 остаётся хрупким до исправления обработки ошибок.
 - Качество vision-ответа и парсинг JSON с реального апстрима не проверялись в этом прогоне (нет валидного ключа/сети).
 - Интерактивные графики после гидратации React не проверялись визуально в браузере.
+
+---
+
+## 2026-05-14T14:15:45.134Z - migration
+Project: park
+Summary: Deployment migrated from Vercel to Render.
+Previous deploy: https://park-b3ibgxms0-alievrusiks-projects.vercel.app
+Current deploy: https://laplace-subprojects-park.onrender.com
+Notes:
+- Vercel resources are kept as legacy fallback.

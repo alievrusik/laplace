@@ -15,3 +15,13 @@ Deploy: https://penguin-counter-cjby4yz4i-alievrusiks-projects.vercel.app
 Notes:
 - Operational dependence on Anthropic or vLLM availability and on optional HTTPS proxy/CA configuration for outbound foundation calls.
 - Species normalization maps English keyed JSON per prompt; arbitrary Cyrillic-only species tokens would fall back to unknown unless added as aliases (prompt mitigates by requiring English keys).
+
+---
+
+## 2026-05-14T14:15:44.329Z - migration
+Project: penguin-counter
+Summary: Deployment migrated from Vercel to Render.
+Previous deploy: https://penguin-counter-cjby4yz4i-alievrusiks-projects.vercel.app
+Current deploy: https://laplace-subprojects-penguin-counter.onrender.com
+Notes:
+- Vercel resources are kept as legacy fallback.

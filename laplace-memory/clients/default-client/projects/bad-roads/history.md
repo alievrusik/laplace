@@ -39,3 +39,13 @@ Notes:
 - Rate limiting и доступность публичного OSM API могут часто включать синтетический режим на shared-хостингах.
 - Точность геокодирования и извлечения адресов без настроенного языкового провайдера ограничена эвристиками.
 - Сегментация SAM3 и прямые вызовы Anthropic не проверялись без реальных SAM3_API_* и ANTHROPIC_API_KEY.
+
+---
+
+## 2026-05-14T14:07:21.995Z - migration
+Project: bad-roads
+Summary: Deployment migrated from Vercel to Render.
+Previous deploy: https://bad-roads-lbtl1nlbb-alievrusiks-projects.vercel.app
+Current deploy: https://laplace-subprojects-bad-roads.onrender.com
+Notes:
+- Vercel resources are kept as legacy fallback.
