@@ -26,15 +26,31 @@ export function renderQuickIdeaSummary(report: IdeaValidationReport): string {
 
 export function renderIdeaReport(report: IdeaValidationReport): string[] {
   const messages: string[] = [];
+  const blockers = report.criticReports.flatMap((item) => item.findings).filter((item) => item.severity === "blocker").length;
+  const warns = report.criticReports.flatMap((item) => item.findings).filter((item) => item.severity === "warn").length;
+  const topActions = dedupe(
+    report.criticReports.flatMap((item) => item.recommendations).map((item) => item.trim()).filter(Boolean),
+  ).slice(0, 6);
+  const promptTrace = Object.entries(report.promptVersions ?? {}).slice(0, 10).map(([id, version]) => `- ${id}@${version}`);
   messages.push([
     "Idea validation report",
+    "",
+    "Executive",
     `Verdict: ${report.verdict}`,
     `Score: ${report.overallScore.toFixed(2)}/10 (conf ${Math.round(report.overallConfidence * 100)}%)`,
     `Critics: ${report.criticReports.length}`,
+    `Findings: blockers=${blockers}, warnings=${warns}`,
     `Prompt packs: ${Object.keys(report.promptVersions ?? {}).length}`,
+    "",
+    "Top actions:",
+    ...(topActions.length ? topActions.map((item) => `- ${item}`) : ["- none"]),
     "",
     `Enriched prompt:\n${truncate(report.enrichedPrompt, 1400)}`,
   ].join("\n"));
+
+  if (promptTrace.length) {
+    messages.push(["Prompt trace", ...promptTrace].join("\n"));
+  }
 
   for (const critic of report.criticReports) {
     messages.push(renderCritic(critic));
@@ -91,8 +107,11 @@ export function renderIdeaReport(report: IdeaValidationReport): string[] {
 }
 
 export function renderPrototypeReport(report: PrototypeValidationReport): string {
+  const promptTrace = Object.entries(report.promptVersions ?? {}).slice(0, 10).map(([id, version]) => `- ${id}@${version}`);
   return [
     "Prototype audit report",
+    "",
+    "Executive",
     `matchesIntent: ${report.matchesIntent ? "yes" : "no"}`,
     `intentAlignmentScore: ${report.intentAlignmentScore}/10`,
     `coherenceScore: ${report.coherenceScore}/10`,
@@ -103,10 +122,15 @@ export function renderPrototypeReport(report: PrototypeValidationReport): string
     "Summary:",
     report.executiveSummary,
     "",
+    "Technical",
+    "Model findings:",
+    ...(report.findings.length ? report.findings.slice(0, 8).map((item) => `- [${item.severity}] ${item.statement}`) : ["- none"]),
+    "",
     "Static issues:",
     ...(report.staticAnalysisIssues.length
       ? report.staticAnalysisIssues.slice(0, 10).map((item) => `- ${item.category}: ${item.filePath}${item.line ? `:${item.line}` : ""} - ${item.message}`)
       : ["- None"]),
+    ...(promptTrace.length ? ["", "Prompt trace:", ...promptTrace] : []),
     ...(report.refinementPrompt ? ["", "Refinement prompt:", report.refinementPrompt] : []),
   ].join("\n");
 }
@@ -190,4 +214,15 @@ function splitText(text: string, maxChars: number): string[] {
   }
   flush();
   return chunks;
+}
+
+function dedupe(values: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of values) {
+    if (seen.has(item)) continue;
+    seen.add(item);
+    out.push(item);
+  }
+  return out;
 }
