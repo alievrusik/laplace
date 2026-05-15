@@ -19,15 +19,10 @@ export class LaplaceLlm {
   }
 
   async complete(messages: ChatCompletionMessageParam[]): Promise<string> {
-    const isAnthropicCompat = isAnthropicCompatibleModel({
-      baseURL: this.config.baseURL,
-      model: this.config.model,
-    });
     const request = {
       model: this.config.model,
       messages,
       max_tokens: 512,
-      ...(isAnthropicCompat ? {} : { temperature: 0.2 }),
       ...(this.config.disableReasoning
         ? {
             chat_template_kwargs: {
@@ -101,8 +96,4 @@ function extractJson(text: string): string {
   if (match?.[1]) return match[1].trim();
 
   throw new Error(`LLM response did not contain JSON: ${text.slice(0, 200)}`);
-}
-
-function isAnthropicCompatibleModel(args: { baseURL: string; model: string }): boolean {
-  return /api\.anthropic\.com/i.test(args.baseURL) || /^claude-/i.test(args.model);
 }

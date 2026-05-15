@@ -1,6 +1,8 @@
 import "dotenv/config";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { LaplaceLlm } from "../llm/laplaceLlm.js";
+import { runModelPolicyCheck } from "../testing/modelPolicyCheck.js";
 import { FileCache } from "./cache.js";
 import { TavilyClient } from "./grounding/tavily.js";
 import { AnthropicClient } from "./grounding/anthropicClient.js";
@@ -18,6 +20,22 @@ async function main() {
   const tavily = new TavilyClient({ apiKey: process.env.TAVILY_API_KEY, cache });
   checks.push({ name: "TAVILY_API_KEY", ok: Boolean(process.env.TAVILY_API_KEY), detail: process.env.TAVILY_API_KEY ? "set" : "missing" });
   checks.push({ name: "ANTHROPIC_API_KEY", ok: Boolean(process.env.ANTHROPIC_API_KEY), detail: process.env.ANTHROPIC_API_KEY ? "set" : "missing" });
+  try {
+    runModelPolicyCheck();
+    checks.push({ name: "Model role mapping", ok: true, detail: "builder/tester/revisor mapping intact" });
+  } catch (error) {
+    checks.push({ name: "Model role mapping", ok: false, detail: String(error) });
+  }
+  try {
+    const llmSource = await fs.readFile(new URL("../llm/laplaceLlm.ts", import.meta.url), "utf8");
+    checks.push({
+      name: "Temperature-free LLM payload",
+      ok: !/temperature\s*:/.test(llmSource),
+      detail: /temperature\s*:/.test(llmSource) ? "temperature key found" : "no temperature key",
+    });
+  } catch (error) {
+    checks.push({ name: "Temperature-free LLM payload", ok: false, detail: String(error) });
+  }
 
   try {
     const ping = await llm.complete([
