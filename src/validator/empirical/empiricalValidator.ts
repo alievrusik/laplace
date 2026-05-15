@@ -3,6 +3,7 @@ import path from "node:path";
 import type { LaplaceLlm } from "../../llm/laplaceLlm.js";
 import type { TavilyClient } from "../grounding/tavily.js";
 import {
+  EmpiricalSampleSchema,
   EmpiricalValidationResultSchema,
   type EmpiricalValidationResult,
   type EmpiricalRunItem,
@@ -151,7 +152,7 @@ export class EmpiricalValidator {
     snippets: Array<{ title: string; url: string; content: string }>,
     endpointExample: Record<string, unknown>,
   ): Promise<EmpiricalSample[]> {
-    return this.deps.llm.completeJson<{ samples?: EmpiricalSample[] }>([
+    return this.deps.llm.completeJson<{ samples?: unknown[] }>([
       {
         role: "system",
         content: validatorPrompts.empiricalSampleSynthesis.system.replace("30", String(TOTAL_SAMPLES)),
@@ -160,7 +161,7 @@ export class EmpiricalValidator {
         role: "user",
         content: JSON.stringify({ enrichedPrompt, snippets: snippets.slice(0, 12), endpointExample }),
       },
-    ]).then((r) => (r.samples ?? []).slice(0, TOTAL_SAMPLES)).catch(() => []);
+    ]).then((r) => normalizeSamples(r.samples ?? [], endpointExample, TOTAL_SAMPLES)).catch(() => []);
   }
 
   private async runSamples(
@@ -286,6 +287,7 @@ function aggregateEmpirical(args: {
   else if (groundTruthAccuracy !== undefined && groundTruthAccuracy >= 0.8) verdict = "production_ready";
   else verdict = "demo_ready";
 
+  const failedRuns = args.runs.filter((item) => item.status !== "ok");
   return {
     totalSamples: args.runs.length,
     coverage,
@@ -302,7 +304,7 @@ function aggregateEmpirical(args: {
       p75: percentile(agreementValues, 0.75),
     },
     groundTruthAccuracy,
-    topFailures: args.runs.slice(0, 5),
+    topFailures: failedRuns.slice(0, 5),
     topSuccesses: successful.slice(0, 3),
     failureBreakdown,
     recommendations: [
@@ -314,6 +316,43 @@ function aggregateEmpirical(args: {
     approxCostUsd: 0.5,
     durationSec: args.durationSec,
   };
+}
+
+function normalizeSamples(rawSamples: unknown[], endpointExample: Record<string, unknown>, limit: number): EmpiricalSample[] {
+  const out: EmpiricalSample[] = [];
+  for (let i = 0; i < rawSamples.length && out.length < limit; i += 1) {
+    const sample = toEmpiricalSample(rawSamples[i], endpointExample, out.length + 1);
+    if (sample) out.push(sample);
+  }
+  return out;
+}
+
+function toEmpiricalSample(
+  raw: unknown,
+  endpointExample: Record<string, unknown>,
+  index: number,
+): EmpiricalSample | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const rec = raw as Record<string, unknown>;
+  const payloadCandidate = rec.payload ?? rec.input ?? endpointExample;
+  const payload = isRecord(payloadCandidate) ? payloadCandidate : endpointExample;
+  if (!isRecord(payload)) return undefined;
+
+  const categoryRaw = rec.category;
+  const category = categoryRaw === "edge" || categoryRaw === "adversarial" ? categoryRaw : "typical";
+  const parsed = EmpiricalSampleSchema.safeParse({
+    id: typeof rec.id === "string" && rec.id.trim() ? rec.id : `sample_${String(index).padStart(2, "0")}`,
+    payload,
+    category,
+    sourceSnippet: typeof rec.sourceSnippet === "string" ? rec.sourceSnippet : undefined,
+    groundTruthHint: typeof rec.groundTruthHint === "string" ? rec.groundTruthHint : undefined,
+    groundTruthSource: typeof rec.groundTruthSource === "string" ? rec.groundTruthSource : undefined,
+  });
+  return parsed.success ? parsed.data : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function percentile(values: number[], p: number): number {
