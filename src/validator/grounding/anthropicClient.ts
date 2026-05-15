@@ -55,6 +55,7 @@ export class AnthropicClient implements AnthropicLikeClient {
     }
     const json = (await response.json()) as {
       content?: Array<{ type: string; text?: string }>;
+      stop_reason?: string;
     };
     const text = (json.content ?? [])
       .filter((part) => part.type === "text")
@@ -62,6 +63,9 @@ export class AnthropicClient implements AnthropicLikeClient {
       .join("\n")
       .trim();
     if (!text) throw new Error("Anthropic returned empty content");
+    if (json.stop_reason === "max_tokens") {
+      console.warn(`[anthropic] response reached max_tokens=${this.config.maxTokens ?? 16384}`);
+    }
     await this.config.cache?.set("anthropic-complete", cacheKey, text);
     return text;
   }
@@ -75,10 +79,19 @@ export class AnthropicClient implements AnthropicLikeClient {
         ...messages,
         {
           role: "system",
-          content: "Return only valid compact JSON. No markdown.",
+          content:
+            "Return only valid compact JSON. No markdown. Keep arrays <= 8 items and long strings <= 600 chars.",
         },
       ]);
-      return JSON.parse(extractJson(output)) as T;
+      try {
+        return JSON.parse(extractJson(output)) as T;
+      } catch (retryError) {
+        const salvaged = trySalvageBalanced(output);
+        if (salvaged) {
+          return JSON.parse(salvaged) as T;
+        }
+        throw retryError;
+      }
     }
   }
 
@@ -115,4 +128,39 @@ function extractJson(text: string): string {
   }
   const start = objStart < 0 ? arrStart : arrStart < 0 ? objStart : Math.min(objStart, arrStart);
   return trimmed.slice(start);
+}
+
+function trySalvageBalanced(text: string): string | null {
+  const trimmed = text.trim();
+  const objStart = trimmed.indexOf("{");
+  const arrStart = trimmed.indexOf("[");
+  if (objStart < 0 && arrStart < 0) return null;
+  const start = objStart < 0 ? arrStart : arrStart < 0 ? objStart : Math.min(objStart, arrStart);
+  const opener = trimmed[start];
+  const closer = opener === "{" ? "}" : "]";
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < trimmed.length; i += 1) {
+    const ch = trimmed[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escape = true;
+      continue;
+    }
+    if (ch === "\"") {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === opener) depth += 1;
+    if (ch === closer) {
+      depth -= 1;
+      if (depth === 0) return trimmed.slice(start, i + 1);
+    }
+  }
+  return null;
 }
