@@ -14,7 +14,6 @@ import { ResourceEstimator } from "./resource/estimator.js";
 import { TelegramBot } from "./telegram/bot.js";
 import { MiniAppServer } from "./telegram/miniAppServer.js";
 import {
-  AnthropicClient,
   FileCache,
   IdeaValidator,
   PrototypeValidator,
@@ -47,40 +46,29 @@ async function main() {
   let ideaValidator: IdeaValidator | undefined;
   let prototypeValidator: PrototypeValidator | undefined;
   if (config.validator.enabled) {
+    const validatorLlm = new LaplaceLlm(config.validator.llm);
     const validatorCache = new FileCache(
       config.validator.cacheDir,
       undefined,
       config.validator.cacheDisabled,
     );
-    const validatorAnthropic = config.validator.useAnthropic && config.demoFoundation.anthropicApiKey
-      ? new AnthropicClient({
-          apiKey: config.demoFoundation.anthropicApiKey,
-          model: config.demoFoundation.anthropicModel,
-          proxyUrl: config.demoFoundation.anthropicProxyUrl,
-          proxyCaCertPath: config.demoFoundation.anthropicProxyCaCertPath,
-          proxyCaCertBase64: config.demoFoundation.anthropicProxyCaCertBase64,
-          cache: validatorCache,
-        })
-      : undefined;
     const tavily = new TavilyClient({
       apiKey: config.validator.tavilyApiKey,
       cache: validatorCache,
     });
     ideaValidator = new IdeaValidator({
-      laplaceLlm: llm,
-      anthropic: validatorAnthropic,
+      laplaceLlm: validatorLlm,
       tavilyApiKey: config.validator.tavilyApiKey,
       cacheDir: config.validator.cacheDir,
       cacheDisabled: config.validator.cacheDisabled,
       enableAdvanced: true,
     });
     prototypeValidator = new PrototypeValidator({
-      laplaceLlm: llm,
-      anthropic: validatorAnthropic,
+      laplaceLlm: validatorLlm,
       tavily,
     });
     console.log(
-      `[validator] enabled (anthropic=${Boolean(validatorAnthropic)}, tavily=${Boolean(config.validator.tavilyApiKey)}, empirical=${Boolean(validatorAnthropic && config.validator.tavilyApiKey)})`,
+      `[validator] enabled (model=${config.validator.llm.model}, baseURL=${config.validator.llm.baseURL}, tavily=${Boolean(config.validator.tavilyApiKey)}, empirical=${Boolean(config.validator.tavilyApiKey)})`,
     );
   }
 

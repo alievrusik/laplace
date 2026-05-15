@@ -5,7 +5,6 @@ import { LaplaceLlm } from "../llm/laplaceLlm.js";
 import { runModelPolicyCheck } from "../testing/modelPolicyCheck.js";
 import { FileCache } from "./cache.js";
 import { TavilyClient } from "./grounding/tavily.js";
-import { AnthropicClient } from "./grounding/anthropicClient.js";
 import { IdeaValidator } from "./orchestrator.js";
 
 async function main() {
@@ -19,7 +18,11 @@ async function main() {
   const cache = new FileCache(path.resolve("./laplace-cache/validator/selfcheck"), undefined, true);
   const tavily = new TavilyClient({ apiKey: process.env.TAVILY_API_KEY, cache });
   checks.push({ name: "TAVILY_API_KEY", ok: Boolean(process.env.TAVILY_API_KEY), detail: process.env.TAVILY_API_KEY ? "set" : "missing" });
-  checks.push({ name: "ANTHROPIC_API_KEY", ok: Boolean(process.env.ANTHROPIC_API_KEY), detail: process.env.ANTHROPIC_API_KEY ? "set" : "missing" });
+  checks.push({
+    name: "VALIDATOR_LLM_MODEL",
+    ok: Boolean(process.env.VALIDATOR_LLM_MODEL ?? process.env.LAPLACE_LLM_MODEL),
+    detail: process.env.VALIDATOR_LLM_MODEL ?? process.env.LAPLACE_LLM_MODEL ?? "missing",
+  });
   try {
     runModelPolicyCheck();
     checks.push({ name: "Model role mapping", ok: true, detail: "builder/tester/revisor mapping intact" });
@@ -50,22 +53,6 @@ async function main() {
   if (tavily.isEnabled()) {
     const hits = await tavily.search("AI startup validation", 2).catch(() => []);
     checks.push({ name: "Tavily search", ok: hits.length > 0, detail: `hits=${hits.length}` });
-  }
-
-  if (process.env.ANTHROPIC_API_KEY) {
-    try {
-      const anthropic = new AnthropicClient({
-        apiKey: process.env.ANTHROPIC_API_KEY,
-        model: process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6",
-      });
-      const reply = await anthropic.complete([
-        { role: "system", content: "Reply with pong" },
-        { role: "user", content: "ping" },
-      ]);
-      checks.push({ name: "Anthropic ping", ok: /pong/i.test(reply), detail: reply.slice(0, 60) });
-    } catch (error) {
-      checks.push({ name: "Anthropic ping", ok: false, detail: String(error) });
-    }
   }
 
   try {

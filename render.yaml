@@ -14,6 +14,12 @@ services:
         sync: false
       - key: VALIDATOR_ENABLED
         value: "true"
+      - key: VALIDATOR_LLM_BASE_URL
+        value: "http://0.0.0.0:8001/v1"
+      - key: VALIDATOR_LLM_MODEL
+        value: "qwen3.5-397b-fp8"
+      - key: VALIDATOR_LLM_API_KEY
+        sync: false
       - key: VALIDATOR_AUTO_PRE_VALIDATE
         value: "true"
       - key: VALIDATOR_AUTO_POST_AUDIT

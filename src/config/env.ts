@@ -91,6 +91,10 @@ const envSchema = z.object({
     .enum(["true", "false"])
     .default("false")
     .transform((value) => value === "true"),
+  VALIDATOR_LLM_BASE_URL: optionalUrl,
+  VALIDATOR_LLM_API_KEY: optionalString,
+  VALIDATOR_LLM_MODEL: optionalString,
+  VALIDATOR_LLM_DISABLE_REASONING: optionalBoolean,
   VALIDATOR_CACHE_DIR: optionalString,
   VALIDATOR_CACHE_DISABLED: z
     .enum(["true", "false"])
@@ -161,6 +165,12 @@ export function loadConfig() {
   const cursorSkepticModel = env.CURSOR_SKEPTIC_MODEL ?? cursorBriefModel;
   const cursorEstimatorModel = env.CURSOR_ESTIMATOR_MODEL ?? cursorSkepticModel;
   const cursorRevisorModel = env.CURSOR_REVISOR_MODEL ?? env.CURSOR_TESTER_MODEL;
+  const validatorLlmBaseURL = env.VALIDATOR_LLM_BASE_URL ?? "http://0.0.0.0:8001/v1";
+  const validatorLlmApiKey = resolveApiKeyForBaseUrl({
+    baseURL: validatorLlmBaseURL,
+    explicitApiKey: env.VALIDATOR_LLM_API_KEY,
+    fallbackApiKey: env.LAPLACE_LLM_API_KEY,
+  });
   const availableFoundationProviders = resolveAvailableFoundationProviders({
     configuredProviders: env.DEMO_FOUNDATION_PROVIDERS,
     fallbackProvider: env.DEMO_FOUNDATION_PROVIDER,
@@ -243,6 +253,12 @@ export function loadConfig() {
       enabled: env.VALIDATOR_ENABLED,
       useAnthropic: env.VALIDATOR_USE_ANTHROPIC,
       tavilyApiKey: env.TAVILY_API_KEY,
+      llm: {
+        baseURL: validatorLlmBaseURL,
+        apiKey: validatorLlmApiKey,
+        model: env.VALIDATOR_LLM_MODEL ?? "qwen3.5-397b-fp8",
+        disableReasoning: env.VALIDATOR_LLM_DISABLE_REASONING ?? env.LAPLACE_LLM_DISABLE_REASONING,
+      },
       cacheDir: env.VALIDATOR_CACHE_DIR ?? path.resolve(process.cwd(), "laplace-cache", "validator"),
       cacheDisabled: env.VALIDATOR_CACHE_DISABLED,
       autoPreValidate: env.VALIDATOR_AUTO_PRE_VALIDATE,
@@ -343,4 +359,26 @@ function resolveAvailableFoundationProviders(args: {
 
 function unique<T>(items: T[]): T[] {
   return [...new Set(items)];
+}
+
+function resolveApiKeyForBaseUrl(args: {
+  baseURL: string;
+  explicitApiKey?: string;
+  fallbackApiKey?: string;
+}): string {
+  if (args.explicitApiKey) return args.explicitApiKey;
+  if (args.fallbackApiKey) return args.fallbackApiKey;
+  if (isLocalBaseUrl(args.baseURL)) return "local-no-key";
+  throw new Error(
+    `Invalid Laplace environment:\nVALIDATOR_LLM_API_KEY: required for non-local endpoint ${args.baseURL}`,
+  );
+}
+
+function isLocalBaseUrl(baseURL: string): boolean {
+  try {
+    const parsed = new URL(baseURL);
+    return ["localhost", "127.0.0.1", "0.0.0.0", "::1"].includes(parsed.hostname);
+  } catch {
+    return false;
+  }
 }

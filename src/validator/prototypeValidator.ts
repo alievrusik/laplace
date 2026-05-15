@@ -1,7 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { LaplaceLlm } from "../llm/laplaceLlm.js";
-import type { AnthropicLikeClient } from "./grounding/anthropicClient.js";
 import { StaticAnalyzer } from "./staticAnalysis.js";
 import { EmpiricalValidator } from "./empirical/empiricalValidator.js";
 import type { TavilyClient } from "./grounding/tavily.js";
@@ -26,7 +25,6 @@ export class PrototypeValidator {
   constructor(
     private readonly deps: {
       laplaceLlm: LaplaceLlm;
-      anthropic?: AnthropicLikeClient;
       tavily: TavilyClient;
     },
   ) {}
@@ -37,7 +35,7 @@ export class PrototypeValidator {
     const hasPlaceholders = staticIssues.some((item) => item.category === "todo_in_critical_path" || item.category === "placeholder_logic");
 
     const codeDump = await this.collectCodeDump(input.projectDir);
-    const llm = this.deps.anthropic ?? this.deps.laplaceLlm;
+    const llm = this.deps.laplaceLlm;
     const llmReview: Partial<PrototypeValidationReport> = await llm.completeJson<Partial<PrototypeValidationReport>>([
       {
         role: "system",
@@ -60,7 +58,6 @@ export class PrototypeValidator {
 
     const empirical = await new EmpiricalValidator({
       llm: this.deps.laplaceLlm,
-      anthropic: this.deps.anthropic,
       tavily: this.deps.tavily,
     }).validate({
       originalIdea: input.originalIdea,

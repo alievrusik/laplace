@@ -1,7 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { LaplaceLlm } from "../../llm/laplaceLlm.js";
-import type { AnthropicLikeClient } from "../grounding/anthropicClient.js";
 import type { TavilyClient } from "../grounding/tavily.js";
 import {
   EmpiricalValidationResultSchema,
@@ -19,7 +18,6 @@ export class EmpiricalValidator {
   constructor(
     private readonly deps: {
       llm: LaplaceLlm;
-      anthropic?: AnthropicLikeClient;
       tavily: TavilyClient;
     },
   ) {}
@@ -31,8 +29,8 @@ export class EmpiricalValidator {
     projectDir: string;
     onProgress?: (message: string) => Promise<void> | void;
   }): Promise<EmpiricalValidationResult> {
-    if (!this.deps.anthropic || !this.deps.tavily.isEnabled()) {
-      return EmpiricalValidationResultSchema.parse({ status: "skipped", reason: "Anthropic or Tavily is not configured." });
+    if (!this.deps.tavily.isEnabled()) {
+      return EmpiricalValidationResultSchema.parse({ status: "skipped", reason: "Tavily is not configured." });
     }
     if (!args.previewUrl) {
       return EmpiricalValidationResultSchema.parse({ status: "failed_no_preview", reason: "Preview URL not found." });
@@ -234,14 +232,13 @@ export class EmpiricalValidator {
     runs: EmpiricalRunItem[],
     inputShape: Record<string, unknown>,
   ): Promise<OracleComparison[] | undefined> {
-    if (!this.deps.anthropic) return undefined;
     const chunks: EmpiricalRunItem[][] = [];
     for (let i = 0; i < runs.length; i += 10) chunks.push(runs.slice(i, i + 10));
     const comparisons: OracleComparison[] = [];
     let failed = 0;
     for (const chunk of chunks) {
       try {
-        const response = await this.deps.anthropic.completeJson<{ comparisons?: OracleComparison[] }>([
+        const response = await this.deps.llm.completeJson<{ comparisons?: OracleComparison[] }>([
           {
             role: "system",
             content: validatorPrompts.empiricalOracle.system,
