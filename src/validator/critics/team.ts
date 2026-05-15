@@ -1,5 +1,6 @@
 import { BaseCritic, type CriticDeps } from "./base.js";
 import type { CriticReport, IdeaInput } from "../types.js";
+import { validatorPrompts } from "../prompts.js";
 
 export class TeamCritic extends BaseCritic {
   readonly role = "team" as const;
@@ -10,7 +11,7 @@ export class TeamCritic extends BaseCritic {
 
   async evaluate(idea: IdeaInput): Promise<CriticReport> {
     return this.completeReport(
-      "Ты Talent Partner. Оцени founder-market fit, командные пробелы и hiring-план. Верни строго CriticReport JSON.",
+      validatorPrompts.teamCritic.system,
       idea.rawPrompt,
     );
   }

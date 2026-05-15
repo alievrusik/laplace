@@ -1,6 +1,7 @@
 import type { LaplaceLlm } from "../llm/laplaceLlm.js";
 import type { AnthropicLikeClient } from "./grounding/anthropicClient.js";
 import { FinancialModelSchema, type CriticReport, type FinancialModel, type IdeaInput } from "./types.js";
+import { validatorPrompts } from "./prompts.js";
 
 export class FinancialModeler {
   constructor(private readonly deps: { laplaceLlm: LaplaceLlm; anthropic?: AnthropicLikeClient }) {}
@@ -10,7 +11,7 @@ export class FinancialModeler {
     const raw = await llm.completeJson<unknown>([
       {
         role: "system",
-        content: "Построй финансовую модель TAM/SAM/SOM + unit economics + burn/runway. Минимум 5 assumptions. Верни строго FinancialModel JSON.",
+        content: validatorPrompts.financialModeler.system,
       },
       {
         role: "user",

@@ -1,6 +1,7 @@
 import type { LaplaceLlm } from "../llm/laplaceLlm.js";
 import type { AnthropicLikeClient } from "./grounding/anthropicClient.js";
 import { ArbitrationReportSchema, type ArbitrationReport, type CriticReport } from "./types.js";
+import { validatorPrompts } from "./prompts.js";
 
 export class Arbitrator {
   constructor(private readonly deps: { laplaceLlm: LaplaceLlm; anthropic?: AnthropicLikeClient }) {}
@@ -10,7 +11,7 @@ export class Arbitrator {
     const raw = await llm.completeJson<unknown>([
       {
         role: "system",
-        content: "Найди numeric/semantic contradictions и consensus между отчётами критиков. Верни строго ArbitrationReport JSON.",
+        content: validatorPrompts.arbitrator.system,
       },
       {
         role: "user",

@@ -1,6 +1,7 @@
 import type { LaplaceLlm } from "../llm/laplaceLlm.js";
 import type { AnthropicLikeClient } from "./grounding/anthropicClient.js";
 import type { CriticReport, IdeaInput } from "./types.js";
+import { validatorPrompts } from "./prompts.js";
 
 export class PromptEnricher {
   constructor(private readonly deps: { laplaceLlm: LaplaceLlm; anthropic?: AnthropicLikeClient }) {}
@@ -10,8 +11,7 @@ export class PromptEnricher {
     const response = await llm.complete([
       {
         role: "system",
-        content:
-          "Перепиши идею в production-ready brief: цель, input->output сценарий, acceptance criteria, ограничения, demo path, риски. Без markdown, без секретов.",
+        content: validatorPrompts.enricher.system,
       },
       {
         role: "user",

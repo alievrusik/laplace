@@ -1,6 +1,7 @@
 import { BaseCritic, type CriticDeps } from "./base.js";
 import type { CriticReport, IdeaInput } from "../types.js";
 import type { TavilyClient } from "../grounding/tavily.js";
+import { validatorPrompts } from "../prompts.js";
 
 interface InvestDeps extends CriticDeps {
   tavily: TavilyClient;
@@ -22,10 +23,8 @@ export class InvestCritic extends BaseCritic {
     ], 5);
     return this.completeReport(
       [
-        "Ты VC Partner.",
-        "Оцени fundability, TAM, growth, deal signals.",
-        "Факты только с citations из web_search_results.",
-        "Верни строго CriticReport JSON.",
+        validatorPrompts.investCritic.system,
+        "Оцени growth и deal signals.",
         `web_search_results=${JSON.stringify(hits.slice(0, 12))}`,
       ].join("\n"),
       idea.rawPrompt,

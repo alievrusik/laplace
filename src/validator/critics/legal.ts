@@ -1,6 +1,7 @@
 import { BaseCritic, type CriticDeps } from "./base.js";
 import type { CriticReport, IdeaInput } from "../types.js";
 import type { TavilyClient } from "../grounding/tavily.js";
+import { validatorPrompts } from "../prompts.js";
 
 interface LegalDeps extends CriticDeps {
   tavily: TavilyClient;
@@ -22,10 +23,7 @@ export class LegalCritic extends BaseCritic {
     ], 5);
     return this.completeReport(
       [
-        "Ты Tech Lawyer.",
-        "Оцени риски IP, лицензий, GDPR/152-ФЗ.",
-        "Факты только с citations из web_search_results.",
-        "Верни строго CriticReport JSON.",
+        validatorPrompts.legalCritic.system,
         `web_search_results=${JSON.stringify(hits.slice(0, 12))}`,
       ].join("\n"),
       idea.rawPrompt,

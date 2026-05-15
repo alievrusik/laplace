@@ -5,6 +5,7 @@ import type { AnthropicLikeClient } from "./grounding/anthropicClient.js";
 import { StaticAnalyzer } from "./staticAnalysis.js";
 import { EmpiricalValidator } from "./empirical/empiricalValidator.js";
 import type { TavilyClient } from "./grounding/tavily.js";
+import { promptVersionMap, validatorPrompts } from "./prompts.js";
 import {
   PrototypeValidationReportSchema,
   type PrototypeValidationReport,
@@ -41,9 +42,7 @@ export class PrototypeValidator {
       {
         role: "system",
         content: [
-          "Ты Principal Engineer + Product Manager.",
-          "Проверь соответствие прототипа исходной задумке.",
-          "Верни JSON со схемой PrototypeValidationReport.",
+          validatorPrompts.prototypeReview.system,
           "Если есть syntax/type errors, coherenceScore должен быть <= 4 и needsRefinement=true.",
           "Если есть critical TODO/placeholder, coherenceScore <= 6.",
         ].join("\n"),
@@ -104,6 +103,10 @@ export class PrototypeValidator {
       executiveSummary: typeof llmReview.executiveSummary === "string" && llmReview.executiveSummary.trim()
         ? llmReview.executiveSummary.trim()
         : "Аудит завершен. Проверьте consistency, стабильность и соответствие сценариям.",
+      promptVersions: {
+        [validatorPrompts.prototypeReview.id]: validatorPrompts.prototypeReview.version,
+        ...promptVersionMap(),
+      },
       empiricalValidation: empirical,
     };
 

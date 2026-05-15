@@ -10,6 +10,7 @@ import {
   type EmpiricalSample,
   type OracleComparison,
 } from "../types.js";
+import { validatorPrompts } from "../prompts.js";
 
 const TOTAL_SAMPLES = 30;
 const GLOBAL_TIMEOUT_MS = 5 * 60 * 1000;
@@ -116,7 +117,7 @@ export class EmpiricalValidator {
     }>([
       {
         role: "system",
-        content: "Извлеки endpoint прототипа. Верни JSON: {url,method,contentType,inputShape,example}.",
+        content: validatorPrompts.empiricalEndpointDetection.system,
       },
       {
         role: "user",
@@ -155,7 +156,7 @@ export class EmpiricalValidator {
     return this.deps.llm.completeJson<{ samples?: EmpiricalSample[] }>([
       {
         role: "system",
-        content: `Синтезируй ${TOTAL_SAMPLES} payload samples (typical/edge/adversarial) для endpoint. Верни JSON {samples:[...]}. Ground truth hints добавляй только если есть явное в snippets.`,
+        content: validatorPrompts.empiricalSampleSynthesis.system.replace("30", String(TOTAL_SAMPLES)),
       },
       {
         role: "user",
@@ -243,8 +244,7 @@ export class EmpiricalValidator {
         const response = await this.deps.anthropic.completeJson<{ comparisons?: OracleComparison[] }>([
           {
             role: "system",
-            content:
-              "Ты oracle reviewer. Для каждого sample оцени agreement 0..1 и при agreement<0.5 добавь failureCategory. Верни JSON {comparisons:[...]}.",
+            content: validatorPrompts.empiricalOracle.system,
           },
           {
             role: "user",

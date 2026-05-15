@@ -7,6 +7,7 @@ export type { PrototypeValidationInput } from "./prototypeValidator.js";
 export { AnthropicClient } from "./grounding/anthropicClient.js";
 export { TavilyClient } from "./grounding/tavily.js";
 export { FileCache } from "./cache.js";
+export { validatorPrompts, promptVersionMap } from "./prompts.js";
 
 export {
   EmpiricalValidationResultSchema,

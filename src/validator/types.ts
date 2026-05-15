@@ -121,6 +121,7 @@ export const IdeaValidationReportSchema = z.object({
   financialModel: FinancialModelSchema.optional(),
   riskRegister: RiskRegisterSchema.optional(),
   investmentMemo: InvestmentMemoSchema.optional(),
+  promptVersions: z.record(z.string(), z.string()).optional(),
   overallScore: z.number().min(0).max(10),
   overallConfidence: z.number().min(0).max(1),
   verdict: VerdictSchema,
@@ -229,6 +230,7 @@ export const PrototypeValidationReportSchema = z.object({
   needsRefinement: z.boolean(),
   refinementPrompt: z.string().optional(),
   executiveSummary: z.string(),
+  promptVersions: z.record(z.string(), z.string()).optional(),
   empiricalValidation: EmpiricalValidationResultSchema.optional(),
 });
 export type PrototypeValidationReport = z.infer<typeof PrototypeValidationReportSchema>;

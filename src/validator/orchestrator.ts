@@ -19,6 +19,7 @@ import {
   UxCritic,
 } from "./critics/index.js";
 import { type CriticReport, type IdeaInput, IdeaValidationReportSchema, type IdeaValidationReport, type Verdict } from "./types.js";
+import { promptVersionMap } from "./prompts.js";
 
 export interface IdeaValidatorConfig {
   laplaceLlm: LaplaceLlm;
@@ -93,6 +94,7 @@ export class IdeaValidator {
       overallScore,
       overallConfidence,
       verdict,
+      promptVersions: promptVersionMap(),
     };
     return IdeaValidationReportSchema.parse(result);
   }
@@ -107,6 +109,7 @@ export class IdeaValidator {
       overallScore,
       overallConfidence,
       verdict,
+      promptVersions: promptVersionMap(),
     });
   }
 }

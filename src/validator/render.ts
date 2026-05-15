@@ -17,6 +17,7 @@ export function renderQuickIdeaSummary(report: IdeaValidationReport): string {
     "Quick pre-validation",
     `Verdict: ${report.verdict}`,
     `Score: ${report.overallScore.toFixed(2)}/10 (conf ${Math.round(report.overallConfidence * 100)}%)`,
+    `Prompt packs: ${Object.keys(report.promptVersions ?? {}).length}`,
     "",
     "Критики:",
     topSignals || "- нет данных",
@@ -30,6 +31,7 @@ export function renderIdeaReport(report: IdeaValidationReport): string[] {
     `Verdict: ${report.verdict}`,
     `Score: ${report.overallScore.toFixed(2)}/10 (conf ${Math.round(report.overallConfidence * 100)}%)`,
     `Critics: ${report.criticReports.length}`,
+    `Prompt packs: ${Object.keys(report.promptVersions ?? {}).length}`,
     "",
     `Enriched prompt:\n${truncate(report.enrichedPrompt, 1400)}`,
   ].join("\n"));
@@ -96,6 +98,7 @@ export function renderPrototypeReport(report: PrototypeValidationReport): string
     `coherenceScore: ${report.coherenceScore}/10`,
     `completenessScore: ${report.completenessScore}/10`,
     `needsRefinement: ${report.needsRefinement ? "yes" : "no"}`,
+    `Prompt packs: ${Object.keys(report.promptVersions ?? {}).length}`,
     "",
     "Summary:",
     report.executiveSummary,

@@ -1,6 +1,7 @@
 import { BaseCritic, type CriticDeps } from "./base.js";
 import type { CriticReport, IdeaInput } from "../types.js";
 import type { TavilyClient } from "../grounding/tavily.js";
+import { validatorPrompts } from "../prompts.js";
 
 interface MarketDeps extends CriticDeps {
   tavily: TavilyClient;
@@ -21,10 +22,8 @@ export class MarketCritic extends BaseCritic {
     const hits = queries.length ? await this.marketDeps.tavily.batch(queries, 5) : [];
     return this.completeReport(
       [
-        "Ты Senior Market Analyst.",
-        "Нельзя делать factual claims без citations из web_search_results.",
+        validatorPrompts.marketCritic.system,
         "Если grounding слабый, confidence <= 0.3.",
-        "Верни строго CriticReport JSON.",
         `web_search_results=${JSON.stringify(hits.slice(0, 12))}`,
       ].join("\n"),
       idea.rawPrompt,
