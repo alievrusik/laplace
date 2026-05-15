@@ -7,3 +7,14 @@ services:
     startCommand: npm run start
     healthCheckPath: /health
     autoDeploy: true
+    envVars:
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: VALIDATOR_ENABLED
+        value: "true"
+      - key: VALIDATOR_AUTO_PRE_VALIDATE
+        value: "true"
+      - key: VALIDATOR_AUTO_POST_AUDIT
+        value: "true"

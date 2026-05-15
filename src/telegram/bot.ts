@@ -34,6 +34,15 @@ import type { ConversationOrchestrator } from "../orchestrator/conversationOrche
 import { routePrototypeProviders } from "../orchestrator/providerRouter.js";
 import type { DeploymentTelemetry } from "../deploy/telemetry.js";
 import type { GigaChatFoundation } from "../llm/gigachat.js";
+import {
+  renderEmpiricalSection,
+  renderIdeaReport,
+  renderPrototypeReport,
+  renderQuickIdeaSummary,
+  type IdeaValidationReport,
+  type PrototypeValidator,
+  type IdeaValidator,
+} from "../validator/index.js";
 import { createTelegramAgent } from "./proxy.js";
 
 type PendingAction = {
@@ -83,6 +92,7 @@ export class TelegramBot {
   private readonly loadedConversationKeys = new Set<string>();
   private readonly loadingConversationKeys = new Map<string, Promise<void>>();
   private readonly pendingConversationSaves = new Map<string, NodeJS.Timeout>();
+  private readonly lastIdeaReports = new Map<string, IdeaValidationReport>();
   private capabilityTaxonomyCache:
     | { value: Awaited<ReturnType<ConversationOrchestrator["buildTaxonomy"]>>; loadedAt: number }
     | undefined;
@@ -102,6 +112,8 @@ export class TelegramBot {
       deploy: DeployProvider;
       deploymentTelemetry?: DeploymentTelemetry;
       gigachat?: GigaChatFoundation;
+      ideaValidator?: IdeaValidator;
+      prototypeValidator?: PrototypeValidator;
     },
   ) {
     const agent = createTelegramAgent({
@@ -267,17 +279,34 @@ export class TelegramBot {
       conversationNotes: notes,
     });
     const output = formatEstimate(projectSlug, estimate);
+    let auditOutput = "";
+    if (this.deps.prototypeValidator && await this.projectExists(projectSlug)) {
+      const cacheKey = this.getConversationKey(args.userId, projectSlug);
+      const lastIdea = this.lastIdeaReports.get(cacheKey);
+      const originalIdea = notes.join("\n") || `Project ${projectSlug}`;
+      const enrichedPrompt = lastIdea?.enrichedPrompt ?? originalIdea;
+      const previewUrl = await this.resolveProjectPreviewUrl(projectSlug);
+      const audit = await this.deps.prototypeValidator.validate({
+        originalIdea,
+        enrichedPrompt,
+        projectDir: path.join(this.deps.config.paths.workspaceDir, projectSlug),
+        previewUrl,
+      });
+      const empiricalLines = renderEmpiricalSection(audit.empiricalValidation).join("\n\n");
+      auditOutput = `${renderPrototypeReport(audit)}\n\n${empiricalLines}`;
+    }
+    const combined = auditOutput ? `${output}\n\n${auditOutput}` : output;
     this.appendMiniAppMessage({
       userId: args.userId,
       projectSlug,
       role: "assistant",
-      text: output,
+      text: combined,
       sourceAgent: "agent_estimator",
       stage: "estimate",
       isIntermediate: false,
       isFinal: true,
     });
-    return output;
+    return combined;
   }
 
   async miniAppGetMessages(args: { userId: number; projectSlug: string; limit?: number }): Promise<MiniAppChatMessage[]> {
@@ -562,6 +591,45 @@ export class TelegramBot {
           message: `estimate готов для ${activeProject}: readiness=${estimate.readinessScore}/100`,
         });
         await ctx.reply(formatEstimate(activeProject, estimate));
+        if (this.deps.prototypeValidator) {
+          const projectDir = path.join(this.deps.config.paths.workspaceDir, activeProject);
+          const exists = await this.projectExists(activeProject);
+          if (!exists) {
+            await ctx.reply("Аудит пропущен: проект еще не собран локально. Запусти /confirm и повтори /estimate.");
+          } else {
+            const cacheKey = this.getConversationKey(ctx.from.id, activeProject);
+            const lastIdea = this.lastIdeaReports.get(cacheKey);
+            const originalIdea = notes.join("\n") || `Project ${activeProject}`;
+            const enrichedPrompt = lastIdea?.enrichedPrompt ?? originalIdea;
+            const previewUrl = await this.resolveProjectPreviewUrl(activeProject);
+            await this.emitWorkflowEvent({
+              ctx,
+              jobId: estimateJobId,
+              source: "estimator",
+              kind: "milestone",
+              message: `запускаю integrated audit для ${activeProject}`,
+            });
+            const audit = await this.deps.prototypeValidator.validate({
+              originalIdea,
+              enrichedPrompt,
+              projectDir,
+              previewUrl,
+              onProgress: async (message) => {
+                await this.emitWorkflowEvent({
+                  ctx,
+                  jobId: estimateJobId,
+                  source: "estimator",
+                  kind: "intermediate",
+                  message,
+                });
+              },
+            });
+            await this.replyLongText(ctx, renderPrototypeReport(audit));
+            for (const block of renderEmpiricalSection(audit.empiricalValidation)) {
+              await this.replyLongText(ctx, block);
+            }
+          }
+        }
       } catch (error) {
         await this.emitWorkflowEvent({
           ctx,
@@ -972,6 +1040,39 @@ export class TelegramBot {
       );
     }
 
+    if (this.deps.ideaValidator && this.deps.config.validator.autoPreValidate) {
+      await this.replyLongText(
+        ctx,
+        "Запускаю validator pre-check: critics + arbitrator + financial/risk memo...",
+      );
+      try {
+        const report = await this.deps.ideaValidator.validate({
+          rawPrompt: pendingSource,
+          targetMarket: profile === "client" ? "RU" : undefined,
+          conversationContext: notes,
+        });
+        const cacheKey = this.getConversationKey(userId, activeProject);
+        this.lastIdeaReports.set(cacheKey, report);
+        await this.replyLongText(ctx, renderQuickIdeaSummary(report));
+        for (const message of renderIdeaReport(report)) {
+          await this.replyLongText(ctx, message);
+        }
+        if (report.verdict !== "go") {
+          this.pendingConfirmations.delete(userId);
+          await this.replyLongText(
+            ctx,
+            `Validator verdict=${report.verdict}. /confirm заблокирован до уточнения scope. Дополни требования и запусти /analyze снова.`,
+          );
+          return false;
+        }
+      } catch (error) {
+        await this.replyLongText(
+          ctx,
+          `Validator pre-check завершился ошибкой: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
     if (feasibility.action !== "confirm") {
       this.pendingConfirmations.delete(userId);
       return false;
@@ -989,6 +1090,58 @@ export class TelegramBot {
   private async projectExists(projectSlug: string): Promise<boolean> {
     const projects = await this.listWorkspaceProjects();
     return projects.includes(projectSlug);
+  }
+
+  private async resolveProjectPreviewUrl(projectSlug: string): Promise<string | undefined> {
+    const snapshot = this.artifactSnapshots.get(projectSlug);
+    if (snapshot?.deployUrl) return snapshot.deployUrl;
+    const summary = await this.deps.memory.readProjectSummary({
+      clientSlug: MEMORY_CLIENT_SLUG,
+      projectSlug,
+      maxChars: 8000,
+    });
+    return extractFirstUrlByLabel(summary, "Demo");
+  }
+
+  private async runAutoPostAudit(args: {
+    ctx: Context;
+    jobId: string;
+    userId?: number;
+    projectSlug: string;
+    previewUrl?: string;
+  }): Promise<void> {
+    if (!this.deps.prototypeValidator) return;
+    await this.emitWorkflowEvent({
+      ctx: args.ctx,
+      jobId: args.jobId,
+      source: "evaluator",
+      kind: "milestone",
+      message: `auto post-audit стартовал для ${args.projectSlug}`,
+    });
+    const cacheKey = args.userId ? this.getConversationKey(args.userId, args.projectSlug) : undefined;
+    const lastIdea = cacheKey ? this.lastIdeaReports.get(cacheKey) : undefined;
+    const notes = args.userId ? this.getProjectNotes(args.userId, args.projectSlug) : [];
+    const originalIdea = notes.join("\n") || `Project ${args.projectSlug}`;
+    const enrichedPrompt = lastIdea?.enrichedPrompt ?? originalIdea;
+    const report = await this.deps.prototypeValidator.validate({
+      originalIdea,
+      enrichedPrompt,
+      projectDir: path.join(this.deps.config.paths.workspaceDir, args.projectSlug),
+      previewUrl: args.previewUrl ?? await this.resolveProjectPreviewUrl(args.projectSlug),
+      onProgress: async (message) => {
+        await this.emitWorkflowEvent({
+          ctx: args.ctx,
+          jobId: args.jobId,
+          source: "evaluator",
+          kind: "intermediate",
+          message,
+        });
+      },
+    });
+    await this.replyLongText(args.ctx, renderPrototypeReport(report));
+    for (const block of renderEmpiricalSection(report.empiricalValidation)) {
+      await this.replyLongText(args.ctx, block);
+    }
   }
 
   private clearDeletedProjectFromSessions(projectSlug: string): void {
@@ -1301,6 +1454,16 @@ export class TelegramBot {
         }),
       });
 
+      if (this.deps.config.validator.autoPostAudit && this.deps.prototypeValidator) {
+        await this.runAutoPostAudit({
+          ctx,
+          jobId: job.id,
+          userId: ctx.from?.id,
+          projectSlug: provisioned.slug,
+          previewUrl: result.previewUrl,
+        });
+      }
+
       await this.emitWorkflowEvent({
         ctx,
         jobId: job.id,
@@ -1414,6 +1577,17 @@ export class TelegramBot {
         }),
       });
       console.log(`Updated memory card: ${cardPath}`);
+
+      if (this.deps.config.validator.autoPostAudit && this.deps.prototypeValidator) {
+        await this.runAutoPostAudit({
+          ctx,
+          jobId: job.id,
+          userId: ctx.from?.id,
+          projectSlug,
+          previewUrl: deployResult.deployment.url,
+        });
+      }
+
       this.updateArtifactSnapshot(projectSlug, {
         repoUrl: repo.repoUrl,
         deployUrl: deployResult.deployment.url,
@@ -2564,8 +2738,8 @@ function renderHelp(): string {
 /miniapp - открыть URL Telegram Mini App backend
 /projects - показать список и переключение между projects
 /project <name> - выбрать существующий или создать новый project-контекст
-/analyze - собрать разговор в задачу, оценить feasibility и бюджет
-/estimate - дать production estimate (команда/инфра/сроки/бюджет) для текущего project
+/analyze - собрать разговор в задачу + запустить validator pre-check перед /confirm
+/estimate - дать production estimate и выполнить audit (static + empirical) для текущего project
 /status - последние builder jobs
 /confirm - подтвердить запуск ожидающей задачи
 /cancel - отменить ожидающий запуск

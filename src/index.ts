@@ -13,6 +13,13 @@ import { ProjectProvisioner } from "./provision/github.js";
 import { ResourceEstimator } from "./resource/estimator.js";
 import { TelegramBot } from "./telegram/bot.js";
 import { MiniAppServer } from "./telegram/miniAppServer.js";
+import {
+  AnthropicClient,
+  FileCache,
+  IdeaValidator,
+  PrototypeValidator,
+  TavilyClient,
+} from "./validator/index.js";
 
 async function main() {
   const config = loadConfig();
@@ -37,6 +44,45 @@ async function main() {
     surveyPath: "GenAI_Client_Survey_Final.xlsx",
   });
   const jobs = new JobRunner();
+  let ideaValidator: IdeaValidator | undefined;
+  let prototypeValidator: PrototypeValidator | undefined;
+  if (config.validator.enabled) {
+    const validatorCache = new FileCache(
+      config.validator.cacheDir,
+      undefined,
+      config.validator.cacheDisabled,
+    );
+    const validatorAnthropic = config.validator.useAnthropic && config.demoFoundation.anthropicApiKey
+      ? new AnthropicClient({
+          apiKey: config.demoFoundation.anthropicApiKey,
+          model: config.demoFoundation.anthropicModel,
+          proxyUrl: config.demoFoundation.anthropicProxyUrl,
+          proxyCaCertPath: config.demoFoundation.anthropicProxyCaCertPath,
+          proxyCaCertBase64: config.demoFoundation.anthropicProxyCaCertBase64,
+          cache: validatorCache,
+        })
+      : undefined;
+    const tavily = new TavilyClient({
+      apiKey: config.validator.tavilyApiKey,
+      cache: validatorCache,
+    });
+    ideaValidator = new IdeaValidator({
+      laplaceLlm: llm,
+      anthropic: validatorAnthropic,
+      tavilyApiKey: config.validator.tavilyApiKey,
+      cacheDir: config.validator.cacheDir,
+      cacheDisabled: config.validator.cacheDisabled,
+      enableAdvanced: true,
+    });
+    prototypeValidator = new PrototypeValidator({
+      laplaceLlm: llm,
+      anthropic: validatorAnthropic,
+      tavily,
+    });
+    console.log(
+      `[validator] enabled (anthropic=${Boolean(validatorAnthropic)}, tavily=${Boolean(config.validator.tavilyApiKey)}, empirical=${Boolean(validatorAnthropic && config.validator.tavilyApiKey)})`,
+    );
+  }
 
   const bot = new TelegramBot({
     config,
@@ -64,6 +110,8 @@ async function main() {
     deploy,
     deploymentTelemetry,
     gigachat,
+    ideaValidator,
+    prototypeValidator,
   });
   const miniApp = new MiniAppServer({
     bot,

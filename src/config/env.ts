@@ -82,6 +82,28 @@ const envSchema = z.object({
     .enum(["true", "false"])
     .default("false")
     .transform((value) => value === "true"),
+  TAVILY_API_KEY: optionalString,
+  VALIDATOR_ENABLED: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((value) => value === "true"),
+  VALIDATOR_USE_ANTHROPIC: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  VALIDATOR_CACHE_DIR: optionalString,
+  VALIDATOR_CACHE_DISABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  VALIDATOR_AUTO_PRE_VALIDATE: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((value) => value === "true"),
+  VALIDATOR_AUTO_POST_AUDIT: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((value) => value === "true"),
 
   DEMO_FOUNDATION_PROVIDER: z.enum(foundationProviders).default("anthropic"),
   DEMO_FOUNDATION_PROVIDERS: optionalString,
@@ -216,6 +238,15 @@ export function loadConfig() {
         subprojectName: env.RENDER_SUBPROJECT_NAME ?? "Laplace-subprojects",
         mcpEnabled: env.RENDER_MCP_ENABLED,
       },
+    },
+    validator: {
+      enabled: env.VALIDATOR_ENABLED,
+      useAnthropic: env.VALIDATOR_USE_ANTHROPIC,
+      tavilyApiKey: env.TAVILY_API_KEY,
+      cacheDir: env.VALIDATOR_CACHE_DIR ?? path.resolve(process.cwd(), "laplace-cache", "validator"),
+      cacheDisabled: env.VALIDATOR_CACHE_DISABLED,
+      autoPreValidate: env.VALIDATOR_AUTO_PRE_VALIDATE,
+      autoPostAudit: env.VALIDATOR_AUTO_POST_AUDIT,
     },
     // Legacy snapshot retained for compatibility in remaining modules.
     vercel: {
